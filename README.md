@@ -24,6 +24,10 @@ A local personal finance app for importing bank statements, classifying transact
 3. Check the dashboard for totals and trends.
 4. Adjust categories and notes in the transactions page.
 
+Golomt Bank's `OperativeAccountStatementRaw` workbook format is currently supported. Unsupported workbook layouts are rejected, and statement or row balance discrepancies are shown as import warnings. Re-uploading the same file is recognized; matching transactions in a different statement are skipped as duplicates.
+
+Use the transaction filters to narrow by date, account, category, or transaction type, then export the filtered list as a CSV for spreadsheets. The Dashboard summarizes categorized income, expenses, savings, fees, and uncategorized spending; transfers remain separate from income and expenses.
+
 ## Backup and restore
 
 Create a backup with:

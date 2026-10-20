@@ -12,4 +12,4 @@ def detect_parser(workbook: Any) -> BankParser:
     for parser_cls in PARSERS:
         if parser_cls.detect(workbook):
             return parser_cls()
-    raise ValueError("No parser available for this workbook")
+    raise ValueError("Unsupported statement format")

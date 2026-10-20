@@ -14,8 +14,6 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
-    func,
-    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -60,7 +58,7 @@ class ImportBatch(Base):
     file_sha256: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     period_from: Mapped[Date | None] = mapped_column(Date, nullable=True)
     period_to: Mapped[Date | None] = mapped_column(Date, nullable=True)
-    imported_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
     total_rows: Mapped[int | None] = mapped_column(nullable=True)
     new_rows: Mapped[int | None] = mapped_column(nullable=True)
     duplicate_rows: Mapped[int | None] = mapped_column(nullable=True)
@@ -90,7 +88,7 @@ class Counterparty(Base):
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     default_category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
     reviewed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
 
     default_category: Mapped[Category | None] = relationship()
 

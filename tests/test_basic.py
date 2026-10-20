@@ -9,12 +9,12 @@ from core.parsers.base import RawTxn
 from core.parsers.golomt import GolomtParser
 
 
-def test_golomt_detects_sample_sheet():
+def test_golomt_rejects_unrecognized_workbook():
     wb = Workbook()
     ws = wb.active
     ws.append(["date", "description", "amount", "balance"])
     ws.append(["2024-01-15", "KFC", 1200, 5000])
-    assert GolomtParser.detect(wb) is True
+    assert GolomtParser.detect(wb) is False
 
 
 def test_txn_hash_stable_and_unique():

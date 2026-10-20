@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -12,7 +12,7 @@ class RawTxn:
     posted_at: datetime
     txn_at: datetime
     amount: Decimal
-    direction: str
+    direction: Literal["in", "out"]
     balance_before: Decimal | None = None
     balance_after: Decimal | None = None
     description: str = ""
@@ -21,6 +21,8 @@ class RawTxn:
     channel: str | None = None
     merchant: str | None = None
     txn_type: str = "other"
+    fee_ref: str | None = None
+    parent_index: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -32,7 +34,10 @@ class StatementData:
     iban: str | None = None
     currency: str = "MNT"
     holder_name: str | None = None
+    period_from: date | None = None
+    period_to: date | None = None
     transactions: list[RawTxn] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 class BankParser(ABC):
