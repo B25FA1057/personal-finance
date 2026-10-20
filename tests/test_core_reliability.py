@@ -266,6 +266,35 @@ def test_import_is_idempotent_links_fee_and_classifies(db_session: Session) -> N
     assert db_session.execute(select(Transaction)).scalars().all()
 
 
+def test_duplicate_reimport_preserves_manual_category(db_session: Session) -> None:
+    manual_category = Category(name="Manual review", kind="expense")
+    db_session.add(manual_category)
+    db_session.commit()
+    data = _statement_bytes()
+    first = import_file(db_session, data, "statement.xlsx")
+    socialpay = db_session.execute(
+        select(Transaction).where(Transaction.description.startswith("SocialPay"))
+    ).scalar_one()
+    socialpay_id = socialpay.id
+    socialpay.category_id = manual_category.id
+    socialpay.category_source = "manual"
+    db_session.commit()
+
+    repeated_rows = import_file(
+        db_session,
+        _statement_bytes(report_date="2026-01-15"),
+        "statement-copy.xlsx",
+    )
+
+    preserved = db_session.get(Transaction, socialpay_id)
+    assert repeated_rows.batch_id != first.batch_id
+    assert repeated_rows.new_rows == 0
+    assert repeated_rows.duplicate_rows == 3
+    assert preserved is not None
+    assert preserved.category_id == manual_category.id
+    assert preserved.category_source == "manual"
+
+
 def test_import_failure_rolls_back_without_creating_records(db_session: Session) -> None:
     workbook = Workbook()
     workbook.active.append(["not", "a", "Golomt", "statement"])

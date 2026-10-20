@@ -28,6 +28,8 @@ Golomt Bank's `OperativeAccountStatementRaw` workbook format is currently suppor
 
 Use the transaction filters to narrow by date, account, category, or transaction type, then export the filtered list as a CSV for spreadsheets. The Dashboard summarizes categorized income, expenses, savings, fees, and uncategorized spending; transfers remain separate from income and expenses.
 
+The Transactions page supports description search, merchant/payee filtering, date/category/type filters, and editing descriptions, categories, and transaction types. Results are paginated. Saving a manual category marks it as manual so rule re-application and duplicate statement imports do not overwrite it. The Dashboard uses database-side monthly and category aggregations; own-account transfers are excluded from cash-flow totals.
+
 ## Backup and restore
 
 Create a backup with:

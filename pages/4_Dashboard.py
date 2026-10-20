@@ -6,9 +6,17 @@ from decimal import Decimal
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from sqlalchemy import func, or_, select
 
 from core.db import get_session
-from core.queries import transactions_df
+from core.models import Category, Transaction
+from core.queries import (
+    expense_categories_df,
+    expense_trend_df,
+    monthly_cashflow_df,
+    top_expenses_df,
+    top_merchant_expenses_df,
+)
 
 
 def _money(value: Decimal) -> str:
@@ -42,140 +50,145 @@ if date_from > date_to:
     st.stop()
 
 with get_session() as session:
-    transactions = transactions_df(session, date_from, date_to, hide_fees=False)
+    monthly = monthly_cashflow_df(session, date_from, date_to)
+    category_spending = expense_categories_df(session, date_from, date_to)
+    top_merchants = top_merchant_expenses_df(session, date_from, date_to)
+    largest_expenses = top_expenses_df(session, date_from, date_to)
+    end_exclusive = date.fromordinal(date_to.toordinal() + 1)
+    fees_total = session.scalar(
+        select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.txn_at >= date_from,
+            Transaction.txn_at < end_exclusive,
+            Transaction.txn_type == "fee",
+        )
+    ) or Decimal("0.00")
+    uncategorized_out = session.scalar(
+        select(func.coalesce(func.sum(Transaction.amount), 0))
+        .select_from(Transaction)
+        .outerjoin(Category, Category.id == Transaction.category_id)
+        .where(
+            Transaction.txn_at >= date_from,
+            Transaction.txn_at < date.fromordinal(date_to.toordinal() + 1),
+            Transaction.direction == "out",
+            Transaction.category_id.is_(None),
+            Transaction.txn_type != "own_transfer",
+            or_(Category.kind != "transfer", Category.kind.is_(None)),
+        )
+    ) or Decimal("0.00")
 
-if transactions.empty:
-    st.info("No transactions in this date range.")
-    st.stop()
-
-income = transactions[transactions["category_kind"] == "income"]
-expenses = transactions[transactions["category_kind"] == "expense"]
-savings = transactions[transactions["category_kind"] == "savings"]
-fees = transactions[transactions["txn_type"] == "fee"]
-uncategorized_out = transactions[
-    transactions["category"].isna() & (transactions["direction"] == "out")
-]
-
-income_total = sum(income["amount"], Decimal("0.00"))
-expense_total = sum(expenses["amount"], Decimal("0.00"))
-savings_total = sum(savings["amount"], Decimal("0.00"))
-fee_total = sum(fees["amount"], Decimal("0.00"))
-uncategorized_total = sum(uncategorized_out["amount"], Decimal("0.00"))
+if monthly.empty:
+    st.info("No categorized income or expenses in this date range.")
+    income_total = expense_total = savings_total = net_total = Decimal("0.00")
+else:
+    income_total = sum(monthly["income"], Decimal("0.00"))
+    expense_total = sum(monthly["expenses"], Decimal("0.00"))
+    savings_total = sum(monthly["savings"], Decimal("0.00"))
+    net_total = sum(monthly["net_cash_flow"], Decimal("0.00"))
 
 kpis = st.columns(6)
 kpis[0].metric("Income", _money(income_total))
 kpis[1].metric("Expenses", _money(expense_total))
 kpis[2].metric("Savings", _money(savings_total))
-kpis[3].metric("Net", _money(income_total - expense_total - savings_total))
-kpis[4].metric("Bank fees", _money(fee_total))
-kpis[5].metric("Uncategorized out", _money(uncategorized_total))
+kpis[3].metric("Net cash flow", _money(net_total))
+kpis[4].metric("Bank fees", _money(Decimal(str(fees_total))))
+kpis[5].metric("Uncategorized out", _money(Decimal(str(uncategorized_out))))
 
-categorized = transactions[
-    transactions["category_kind"].isin(["income", "expense", "savings"])
-].copy()
-if categorized.empty:
-    st.info("Categorize transactions to see income, expense, and savings charts.")
+st.subheader("Monthly cash flow")
+if monthly.empty:
+    st.info("Classify transactions as income or expense to see monthly cash flow.")
 else:
-    categorized["month"] = pd.to_datetime(categorized["txn_at"]).dt.to_period("M").astype(str)
-    categorized["amount_for_chart"] = categorized["amount"].astype(float)
-    monthly = (
-        categorized.groupby(["month", "category_kind"], as_index=False)["amount_for_chart"]
-        .sum()
-        .rename(columns={"category_kind": "Type", "amount_for_chart": "Amount"})
+    monthly_chart = monthly.melt(
+        id_vars="month",
+        value_vars=["income", "expenses", "savings", "net_cash_flow"],
+        var_name="measure",
+        value_name="amount",
     )
-    st.subheader("Monthly income, expenses & savings")
+    monthly_chart["amount"] = monthly_chart["amount"].astype(float)
+    monthly_chart["measure"] = monthly_chart["measure"].map(
+        {
+            "income": "Income",
+            "expenses": "Expenses",
+            "savings": "Savings",
+            "net_cash_flow": "Net cash flow",
+        }
+    )
     st.plotly_chart(
-        px.bar(monthly, x="month", y="Amount", color="Type", barmode="group"),
+        px.line(monthly_chart, x="month", y="amount", color="measure", markers=True),
         use_container_width=True,
     )
 
-expense_by_category = (
-    expenses.groupby("category", as_index=False)["amount"]
-    .sum()
-    .rename(columns={"amount": "amount_for_chart"})
-    .sort_values("amount_for_chart", ascending=False)
-)
 left, right = st.columns(2)
 with left:
     st.subheader("Expenses by category")
-    if expense_by_category.empty:
+    if category_spending.empty:
         st.info("No categorized expenses in this range.")
     else:
+        chart_data = category_spending.copy()
+        chart_data["amount"] = chart_data["amount"].astype(float)
         st.plotly_chart(
             px.bar(
-                expense_by_category,
-                x="amount_for_chart",
+                chart_data,
+                x="amount",
                 y="category",
                 orientation="h",
-                labels={"amount_for_chart": "Amount", "category": "Category"},
+                labels={"amount": "Amount", "category": "Category"},
             ).update_layout(yaxis={"categoryorder": "total ascending"}),
             use_container_width=True,
         )
 
 with right:
     st.subheader("Top merchants & people")
-    spend = transactions[
-        (transactions["direction"] == "out")
-        & (~transactions["txn_type"].isin(["fee", "own_transfer"]))
-        & transactions["category_kind"].eq("expense")
-    ].copy()
-    spend["payee"] = spend["merchant"].fillna(transactions["counterparty"]).fillna("Unspecified")
-    top_spend = (
-        spend.groupby("payee", as_index=False)["amount"]
-        .sum()
-        .sort_values("amount", ascending=False)
-        .head(10)
-    )
-    if top_spend.empty:
-        st.info("No categorized merchant or person spend in this range.")
+    if top_merchants.empty:
+        st.info("No categorized merchant spend in this range.")
     else:
+        chart_data = top_merchants.copy()
+        chart_data["amount"] = chart_data["amount"].astype(float)
         st.plotly_chart(
-            px.bar(top_spend, x="amount", y="payee", orientation="h").update_layout(
+            px.bar(chart_data, x="amount", y="payee", orientation="h").update_layout(
                 yaxis={"categoryorder": "total ascending"}
             ),
             use_container_width=True,
         )
 
-st.subheader("Category spending trend")
-expense_categories = sorted(expenses["category"].dropna().unique().tolist())
-if not expense_categories:
-    st.info("No categorized expenses to trend.")
+st.subheader("Monthly expense trend")
+if category_spending.empty:
+    st.info("No expense categories are available for a trend.")
 else:
-    selected_category = st.selectbox("Expense category", expense_categories)
-    category_spend = expenses[expenses["category"] == selected_category].copy()
-    category_spend["month"] = pd.to_datetime(category_spend["txn_at"]).dt.to_period("M").astype(str)
-    category_monthly = (
-        category_spend.groupby("month", as_index=False)["amount"]
-        .sum()
-        .rename(columns={"amount": "Amount"})
+    category_by_name = dict(
+        zip(category_spending["category"], category_spending["category_id"])
     )
-    st.plotly_chart(
-        px.line(category_monthly, x="month", y="Amount", markers=True),
-        use_container_width=True,
+    selected_category = st.selectbox(
+        "Expense category",
+        options=category_spending["category"].tolist(),
     )
+    with get_session() as session:
+        trend = expense_trend_df(
+            session=session,
+            category_id=int(category_by_name[selected_category]),
+            date_from=date_from,
+            date_to=date_to,
+        )
+    if trend.empty:
+        st.info("No spending recorded for this category in the selected dates.")
+    else:
+        trend["amount"] = trend["amount"].astype(float)
+        st.plotly_chart(
+            px.line(trend, x="month", y="amount", markers=True),
+            use_container_width=True,
+        )
 
 st.subheader("Largest expenses")
-largest = (
-    expenses[expenses["direction"] == "out"]
-    .sort_values("amount", ascending=False)
-    .head(10)
-)
-if largest.empty:
-    st.info("No categorized expense transactions in this range.")
+if largest_expenses.empty:
+    st.info("No categorized expenses in this range.")
 else:
     st.dataframe(
-        largest[
-            ["txn_at", "amount", "merchant", "counterparty", "description", "category"]
-        ].rename(
-            columns={
-                "txn_at": "Date",
-                "amount": "Amount",
-                "merchant": "Merchant",
-                "counterparty": "Counterparty",
-                "description": "Description",
-                "category": "Category",
-            }
-        ),
+        largest_expenses,
         use_container_width=True,
         hide_index=True,
+        column_config={
+            "txn_at": st.column_config.DatetimeColumn(
+                "Date", format="YYYY-MM-DD HH:mm"
+            ),
+            "amount": st.column_config.NumberColumn("Amount", format="%,.2f ₮"),
+        },
     )

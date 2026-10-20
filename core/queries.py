@@ -4,7 +4,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 import pandas as pd
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, extract, func, or_, select
 from sqlalchemy.orm import Session
 
 from .models import Account, Category, Counterparty, ImportBatch, Transaction
@@ -18,6 +18,7 @@ TRANSACTION_COLUMNS = [
     "direction",
     "amount",
     "signed_amount",
+    "category_id",
     "description",
     "merchant",
     "counterparty",
@@ -154,6 +155,86 @@ def _as_datetime(value: date | datetime | None, *, end: bool = False) -> datetim
     return datetime.combine(value, time.min)
 
 
+def merchant_options(session: Session) -> list[str]:
+    merchant = func.coalesce(
+        func.nullif(func.trim(Transaction.merchant), ""),
+        Counterparty.display_name,
+    )
+    statement = (
+        select(merchant.label("merchant"))
+        .select_from(Transaction)
+        .outerjoin(Counterparty, Counterparty.id == Transaction.counterparty_id)
+        .where(merchant.is_not(None))
+        .distinct()
+        .order_by(merchant)
+    )
+    return list(session.execute(statement).scalars().all())
+
+
+def _transaction_filters(
+    date_from: date | datetime | None,
+    date_to: date | datetime | None,
+    account_ids: list[int] | None,
+    category_ids: list[int] | None,
+    include_uncategorized: bool,
+    txn_types: list[str] | None,
+    search: str | None,
+    merchant_names: list[str] | None,
+    hide_fees: bool,
+) -> list:
+    conditions = []
+    lower_bound = _as_datetime(date_from)
+    upper_bound = _as_datetime(date_to, end=True)
+    if lower_bound is not None:
+        conditions.append(Transaction.txn_at >= lower_bound)
+    if upper_bound is not None:
+        if isinstance(date_to, datetime):
+            conditions.append(Transaction.txn_at <= upper_bound)
+        else:
+            conditions.append(Transaction.txn_at < upper_bound)
+    if account_ids is not None:
+        conditions.append(Account.id.in_(account_ids) if account_ids else False)
+    if category_ids is not None:
+        selected_categories = (
+            Transaction.category_id.in_(category_ids) if category_ids else False
+        )
+        if include_uncategorized:
+            conditions.append(
+                or_(selected_categories, Transaction.category_id.is_(None))
+            )
+        else:
+            conditions.append(selected_categories)
+    elif not include_uncategorized:
+        conditions.append(Transaction.category_id.is_not(None))
+    if txn_types is not None:
+        conditions.append(Transaction.txn_type.in_(txn_types) if txn_types else False)
+    if merchant_names is not None:
+        merchant = func.coalesce(
+            func.nullif(func.trim(Transaction.merchant), ""),
+            Counterparty.display_name,
+        )
+        conditions.append(merchant.in_(merchant_names) if merchant_names else False)
+    if hide_fees:
+        conditions.append(Transaction.txn_type != "fee")
+    if search and search.strip():
+        escaped_search = (
+            search.strip()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        term = f"%{escaped_search}%"
+        conditions.append(
+            or_(
+                Transaction.description.ilike(term, escape="\\"),
+                Transaction.merchant.ilike(term, escape="\\"),
+                Account.account_no.ilike(term, escape="\\"),
+                Counterparty.display_name.ilike(term, escape="\\"),
+            )
+        )
+    return conditions
+
+
 def transactions_df(
     session: Session,
     date_from: date | datetime | None = None,
@@ -164,7 +245,15 @@ def transactions_df(
     txn_types: list[str] | None = None,
     search: str | None = None,
     hide_fees: bool = False,
+    merchant_names: list[str] | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> pd.DataFrame:
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be a positive integer")
+    if offset < 0:
+        raise ValueError("offset must not be negative")
+
     signed_amount = case(
         (Transaction.direction == "in", Transaction.amount),
         else_=-Transaction.amount,
@@ -178,6 +267,7 @@ def transactions_df(
             Transaction.direction,
             Transaction.amount,
             signed_amount.label("signed_amount"),
+            Transaction.category_id,
             Transaction.description,
             Transaction.merchant,
             Counterparty.display_name.label("counterparty"),
@@ -191,52 +281,24 @@ def transactions_df(
         .outerjoin(Counterparty, Counterparty.id == Transaction.counterparty_id)
         .outerjoin(Category, Category.id == Transaction.category_id)
     )
-
-    lower_bound = _as_datetime(date_from)
-    upper_bound = _as_datetime(date_to, end=True)
-    if lower_bound is not None:
-        statement = statement.where(Transaction.txn_at >= lower_bound)
-    if upper_bound is not None:
-        if isinstance(date_to, datetime):
-            statement = statement.where(Transaction.txn_at <= upper_bound)
-        else:
-            statement = statement.where(Transaction.txn_at < upper_bound)
-    if account_ids is not None:
-        statement = statement.where(
-            Account.id.in_(account_ids) if account_ids else False
-        )
-    if category_ids is not None:
-        selected_categories = Transaction.category_id.in_(category_ids) if category_ids else False
-        if include_uncategorized:
-            statement = statement.where(
-                or_(selected_categories, Transaction.category_id.is_(None))
-            )
-        else:
-            statement = statement.where(selected_categories)
-    elif not include_uncategorized:
-        statement = statement.where(Transaction.category_id.is_not(None))
-    if txn_types is not None:
-        statement = statement.where(Transaction.txn_type.in_(txn_types) if txn_types else False)
-    if hide_fees:
-        statement = statement.where(Transaction.txn_type != "fee")
-    if search and search.strip():
-        escaped_search = (
-            search.strip()
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
-        term = f"%{escaped_search}%"
-        statement = statement.where(
-            or_(
-                Transaction.description.ilike(term, escape="\\"),
-                Transaction.merchant.ilike(term, escape="\\"),
-                Account.account_no.ilike(term, escape="\\"),
-                Counterparty.display_name.ilike(term, escape="\\"),
-            )
-        )
-
+    conditions = _transaction_filters(
+        date_from,
+        date_to,
+        account_ids,
+        category_ids,
+        include_uncategorized,
+        txn_types,
+        search,
+        merchant_names,
+        hide_fees,
+    )
+    if conditions:
+        statement = statement.where(*conditions)
     statement = statement.order_by(Transaction.txn_at.desc(), Transaction.id.desc())
+    if limit is not None:
+        statement = statement.limit(limit)
+    if offset:
+        statement = statement.offset(offset)
     rows = session.execute(statement).mappings().all()
     if not rows:
         return pd.DataFrame(columns=TRANSACTION_COLUMNS)
@@ -250,6 +312,268 @@ def transactions_df(
             for row in rows
         ],
         columns=TRANSACTION_COLUMNS,
+    )
+
+
+def transaction_count(
+    session: Session,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+    account_ids: list[int] | None = None,
+    category_ids: list[int] | None = None,
+    include_uncategorized: bool = True,
+    txn_types: list[str] | None = None,
+    search: str | None = None,
+    hide_fees: bool = False,
+    merchant_names: list[str] | None = None,
+) -> int:
+    statement = (
+        select(func.count(Transaction.id))
+        .join(Account, Account.id == Transaction.account_id)
+        .outerjoin(Counterparty, Counterparty.id == Transaction.counterparty_id)
+    )
+    conditions = _transaction_filters(
+        date_from,
+        date_to,
+        account_ids,
+        category_ids,
+        include_uncategorized,
+        txn_types,
+        search,
+        merchant_names,
+        hide_fees,
+    )
+    if conditions:
+        statement = statement.where(*conditions)
+    return int(session.scalar(statement) or 0)
+
+
+def _dashboard_date_filters(
+    date_from: date | datetime | None, date_to: date | datetime | None
+) -> list:
+    conditions = []
+    lower_bound = _as_datetime(date_from)
+    upper_bound = _as_datetime(date_to, end=True)
+    if lower_bound is not None:
+        conditions.append(Transaction.txn_at >= lower_bound)
+    if upper_bound is not None:
+        if isinstance(date_to, datetime):
+            conditions.append(Transaction.txn_at <= upper_bound)
+        else:
+            conditions.append(Transaction.txn_at < upper_bound)
+    conditions.extend(
+        [
+            Transaction.txn_type != "own_transfer",
+            or_(Category.kind != "transfer", Category.kind.is_(None)),
+        ]
+    )
+    return conditions
+
+
+def monthly_cashflow_df(
+    session: Session,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+) -> pd.DataFrame:
+    year = extract("year", Transaction.txn_at).label("year")
+    month = extract("month", Transaction.txn_at).label("month")
+    income = func.coalesce(
+        func.sum(
+            case(
+                (
+                    (Transaction.direction == "in") & (Category.kind == "income"),
+                    Transaction.amount,
+                ),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("income")
+    expenses = func.coalesce(
+        func.sum(
+            case(
+                (
+                    (Transaction.direction == "out") & (Category.kind == "expense"),
+                    Transaction.amount,
+                ),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("expenses")
+    savings = func.coalesce(
+        func.sum(
+            case(
+                (
+                    (Transaction.direction == "out") & (Category.kind == "savings"),
+                    Transaction.amount,
+                ),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("savings")
+    statement = (
+        select(year, month, income, expenses, savings)
+        .select_from(Transaction)
+        .outerjoin(Category, Category.id == Transaction.category_id)
+        .where(*_dashboard_date_filters(date_from, date_to))
+        .group_by(year, month)
+        .order_by(year, month)
+    )
+    rows = session.execute(statement).all()
+    return pd.DataFrame(
+        [
+            {
+                "month": f"{int(row.year):04d}-{int(row.month):02d}",
+                "income": Decimal(row.income),
+                "expenses": Decimal(row.expenses),
+                "savings": Decimal(row.savings),
+                "net_cash_flow": (
+                    Decimal(row.income) - Decimal(row.expenses) - Decimal(row.savings)
+                ),
+            }
+            for row in rows
+        ],
+        columns=["month", "income", "expenses", "savings", "net_cash_flow"],
+    )
+
+
+def expense_categories_df(
+    session: Session,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+) -> pd.DataFrame:
+    statement = (
+        select(
+            Category.id.label("category_id"),
+            Category.name.label("category"),
+            func.sum(Transaction.amount).label("amount"),
+        )
+        .select_from(Transaction)
+        .join(Category, Category.id == Transaction.category_id)
+        .where(
+            *_dashboard_date_filters(date_from, date_to),
+            Transaction.direction == "out",
+            Category.kind == "expense",
+        )
+        .group_by(Category.id, Category.name)
+        .order_by(func.sum(Transaction.amount).desc(), Category.name)
+    )
+    return pd.DataFrame(
+        [
+            {
+                "category_id": row.category_id,
+                "category": row.category,
+                "amount": Decimal(row.amount),
+            }
+            for row in session.execute(statement).all()
+        ],
+        columns=["category_id", "category", "amount"],
+    )
+
+
+def expense_trend_df(
+    session: Session,
+    category_id: int | None = None,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+) -> pd.DataFrame:
+    year = extract("year", Transaction.txn_at).label("year")
+    month = extract("month", Transaction.txn_at).label("month")
+    statement = (
+        select(year, month, func.sum(Transaction.amount).label("amount"))
+        .select_from(Transaction)
+        .join(Category, Category.id == Transaction.category_id)
+        .where(
+            *_dashboard_date_filters(date_from, date_to),
+            Transaction.direction == "out",
+            Category.kind == "expense",
+        )
+    )
+    if category_id is not None:
+        statement = statement.where(Category.id == category_id)
+    statement = statement.group_by(year, month).order_by(year, month)
+    return pd.DataFrame(
+        [
+            {
+                "month": f"{int(row.year):04d}-{int(row.month):02d}",
+                "amount": Decimal(row.amount),
+            }
+            for row in session.execute(statement).all()
+        ],
+        columns=["month", "amount"],
+    )
+
+
+def top_expenses_df(
+    session: Session,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+    limit: int = 10,
+) -> pd.DataFrame:
+    if limit < 1:
+        raise ValueError("limit must be a positive integer")
+    statement = (
+        select(
+            Transaction.txn_at,
+            Transaction.amount,
+            Transaction.merchant,
+            Counterparty.display_name.label("counterparty"),
+            Transaction.description,
+            Category.name.label("category"),
+        )
+        .select_from(Transaction)
+        .join(Category, Category.id == Transaction.category_id)
+        .outerjoin(Counterparty, Counterparty.id == Transaction.counterparty_id)
+        .where(
+            *_dashboard_date_filters(date_from, date_to),
+            Transaction.direction == "out",
+            Category.kind == "expense",
+        )
+        .order_by(Transaction.amount.desc(), Transaction.txn_at.desc())
+        .limit(limit)
+    )
+    return pd.DataFrame(
+        session.execute(statement).all(),
+        columns=["txn_at", "amount", "merchant", "counterparty", "description", "category"],
+    )
+
+
+def top_merchant_expenses_df(
+    session: Session,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+    limit: int = 10,
+) -> pd.DataFrame:
+    if limit < 1:
+        raise ValueError("limit must be a positive integer")
+    merchant = func.coalesce(
+        func.nullif(func.trim(Transaction.merchant), ""),
+        Counterparty.display_name,
+        "Unspecified",
+    ).label("payee")
+    statement = (
+        select(merchant, func.sum(Transaction.amount).label("amount"))
+        .select_from(Transaction)
+        .join(Category, Category.id == Transaction.category_id)
+        .outerjoin(Counterparty, Counterparty.id == Transaction.counterparty_id)
+        .where(
+            *_dashboard_date_filters(date_from, date_to),
+            Transaction.direction == "out",
+            Transaction.txn_type != "fee",
+            Category.kind == "expense",
+        )
+        .group_by(merchant)
+        .order_by(func.sum(Transaction.amount).desc(), merchant)
+        .limit(limit)
+    )
+    return pd.DataFrame(
+        [
+            {"payee": row.payee, "amount": Decimal(row.amount)}
+            for row in session.execute(statement).all()
+        ],
+        columns=["payee", "amount"],
     )
 
 
