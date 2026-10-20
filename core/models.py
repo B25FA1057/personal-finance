@@ -78,7 +78,7 @@ class Category(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sort_order: Mapped[int] = mapped_column(default=100, nullable=False)
     children: Mapped[list["Category"]] = relationship(back_populates="parent")
-    parent: Mapped["Category" | None] = relationship(back_populates="children", remote_side="Category.id")
+    parent: Mapped[Category | None] = relationship(back_populates="children", remote_side="Category.id")
 
 
 class Counterparty(Base):
