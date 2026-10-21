@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from decimal import Decimal
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Bank, Category, Counterparty, OwnAccount, Rule
+from .db import get_session, init_db
+from .models import Bank, Category, Rule
 
 
 DEFAULT_CATEGORIES = [
@@ -20,29 +19,82 @@ DEFAULT_CATEGORIES = [
     ("Transfers", "transfer", 20),
     ("Other income", "income", 30),
     ("Cash withdrawals", "expense", 60),
+    ("Savings", "savings", 10),
+]
+
+DEFAULT_RULES = [
+    (100, "description", "startswith", "EASYINFO FEE FOR"),
+    (110, "description", "startswith", "CHARGES FOR PORD"),
+    (120, "txn_type", "equals", "fee"),
 ]
 
 
 def seed(session: Session) -> None:
-    existing = session.execute(select(Category.name)).scalars().all()
-    if not existing:
-        for name, kind, sort_order in DEFAULT_CATEGORIES:
-            session.add(Category(name=name, kind=kind, sort_order=sort_order, is_default=True))
+    categories_by_name = {
+        category.name: category
+        for category in session.execute(select(Category)).scalars().all()
+    }
+    for name, kind, sort_order in DEFAULT_CATEGORIES:
+        if name not in categories_by_name:
+            category = Category(
+                name=name,
+                kind=kind,
+                sort_order=sort_order,
+                is_default=True,
+            )
+            session.add(category)
+            categories_by_name[name] = category
+    session.flush()
 
-    if not session.execute(select(Bank.id).where(Bank.code == "GOLOMT")).scalar_one_or_none():
+    if session.execute(
+        select(Bank.id).where(Bank.code == "GOLOMT")
+    ).scalar_one_or_none() is None:
         session.add(Bank(code="GOLOMT", name="Golomt Bank"))
 
-    if not session.execute(select(OwnAccount.id).where(OwnAccount.account_no == "5000000001")).scalar_one_or_none():
-        session.add(OwnAccount(account_no="5000000001", label="Main account"))
+    bank_fees = categories_by_name["Bank fees"]
+    legacy_rules = session.execute(
+        select(Rule).where(
+            Rule.priority == 100,
+            Rule.field == "description",
+            Rule.match_type == "contains",
+            Rule.pattern == "FEE",
+            Rule.category_id == bank_fees.id,
+        )
+    ).scalars()
+    for rule in legacy_rules:
+        # This exact signature was the old built-in catch-all fee rule.
+        rule.active = False
 
-    if not session.execute(select(Counterparty.id).where(Counterparty.key == "M:SEZIS BUF")).scalar_one_or_none():
-        session.add(Counterparty(key="M:SEZIS BUF", kind="merchant", display_name="SEZIS BUF"))
-
-    for category in session.execute(select(Category)).scalars().all():
-        if category.name == "Bank fees" and category.id:
-            fee_rule = session.execute(select(Rule.id).where(Rule.pattern == "FEE")).scalar_one_or_none()
-            if not fee_rule:
-                session.add(Rule(priority=100, field="description", match_type="contains", pattern="FEE", category_id=category.id, active=True))
-                break
+    for priority, field, match_type, pattern in DEFAULT_RULES:
+        existing_rule = session.execute(
+            select(Rule.id).where(
+                Rule.priority == priority,
+                Rule.field == field,
+                Rule.match_type == match_type,
+                Rule.pattern == pattern,
+                Rule.category_id == bank_fees.id,
+            )
+        ).scalar_one_or_none()
+        if existing_rule is None:
+            session.add(
+                Rule(
+                    priority=priority,
+                    field=field,
+                    match_type=match_type,
+                    pattern=pattern,
+                    category_id=bank_fees.id,
+                    active=True,
+                )
+            )
 
     session.commit()
+
+
+def main() -> None:
+    init_db()
+    with get_session() as session:
+        seed(session)
+
+
+if __name__ == "__main__":
+    main()

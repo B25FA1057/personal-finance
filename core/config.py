@@ -12,7 +12,11 @@ DATABASE_URL: str = os.getenv("DATABASE_URL") or ""
 TEST_DATABASE_URL: str | None = os.getenv("TEST_DATABASE_URL")
 PG_DUMP_PATH: str | None = os.getenv("PG_DUMP_PATH")
 
-QPAY_FEE_ACCOUNTS: frozenset[str] = frozenset({"2015113727"})
+QPAY_FEE_ACCOUNTS: frozenset[str] = frozenset(
+    account.strip()
+    for account in os.getenv("QPAY_FEE_ACCOUNTS", "").split(",")
+    if account.strip()
+)
 FEE_LINK_WINDOW_SECONDS = 15
 CARD_REF_TOLERANCE_SECONDS = 5
 

@@ -17,6 +17,16 @@ A local personal finance app for importing bank statements, classifying transact
 6. Start the app:
    `start.bat`
 
+## Tests
+
+From PowerShell, run the SQLite-backed test suite without loading `.env`:
+
+```powershell
+$env:PYTHON_DOTENV_DISABLED = "1"
+$env:DATABASE_URL = "sqlite://"
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
 ## Daily use
 
 1. Upload a bank statement `.xlsx` file.
@@ -26,9 +36,13 @@ A local personal finance app for importing bank statements, classifying transact
 
 Golomt Bank's `OperativeAccountStatementRaw` workbook format is currently supported. Unsupported workbook layouts are rejected, and statement or row balance discrepancies are shown as import warnings. Re-uploading the same file is recognized; matching transactions in a different statement are skipped as duplicates.
 
-Use the transaction filters to narrow by date, account, category, or transaction type, then export the filtered list as a CSV for spreadsheets. The Dashboard summarizes categorized income, expenses, savings, fees, and uncategorized spending; transfers remain separate from income and expenses.
+`QPAY_FEE_ACCOUNTS` is an optional comma-separated setting for account identifiers you have verified as QPay fee accounts. It is blank by default; no account identifiers are built into the app.
+
+Use the transaction filters to narrow by date, account, category, or transaction type, then export the filtered list as a CSV for spreadsheets. The Dashboard summarizes categorized income, expenses, savings, fees, and uncategorized inflows/outflows. Transactions identified as transfers by type or category are shown separately and excluded from ordinary cash-flow totals.
 
 The Transactions page supports description search, merchant/payee filtering, date/category/type filters, and editing descriptions, categories, and transaction types. Results are paginated. Saving a manual category marks it as manual so rule re-application and duplicate statement imports do not overwrite it. The Dashboard uses database-side monthly and category aggregations; own-account transfers are excluded from cash-flow totals.
+
+The Budgets page manages monthly expense-category budgets and reports actual outflows by transaction month, excluding own-account transfers. It displays remaining amounts and warns at 80% and when a budget is exceeded. Savings Goals are tracked separately using manually entered saved amounts; bank transfers are not automatically counted as contributions. Budget and goal currency fields are labels only: the current application does not convert currencies or filter transaction spending by account currency. The planning tables are created by the existing non-destructive SQLAlchemy `create_all` initialization; no existing tables or financial records are removed.
 
 ## Backup and restore
 

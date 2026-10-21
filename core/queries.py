@@ -4,10 +4,18 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
 import pandas as pd
-from sqlalchemy import case, extract, func, or_, select
+from sqlalchemy import and_, case, extract, func, or_, select
 from sqlalchemy.orm import Session
 
-from .models import Account, Category, Counterparty, ImportBatch, Transaction
+from .models import (
+    Account,
+    Category,
+    Counterparty,
+    ImportBatch,
+    MonthlyBudget,
+    SavingsGoal,
+    Transaction,
+)
 
 
 TRANSACTION_COLUMNS = [
@@ -49,6 +57,54 @@ def category_id_by_name(session: Session) -> dict[str, int]:
         row.name: int(row.id)
         for row in session.execute(select(Category.id, Category.name)).all()
     }
+
+
+def currency_options(session: Session) -> list[str]:
+    currencies = set(session.scalars(select(Account.currency).distinct()).all())
+    currencies.update(session.scalars(select(MonthlyBudget.currency).distinct()).all())
+    currencies.update(session.scalars(select(SavingsGoal.currency).distinct()).all())
+    if not currencies:
+        currencies.add("MNT")
+    return sorted(currencies)
+
+
+def budget_actuals_df(session: Session, year: int, month: int) -> pd.DataFrame:
+    month_start = date(year, month, 1)
+    next_month = (
+        date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    )
+    actual_spending = func.coalesce(func.sum(Transaction.amount), 0).label(
+        "actual_spending"
+    )
+    statement = (
+        select(Category.id.label("category_id"), Category.name, actual_spending)
+        .select_from(Category)
+        .outerjoin(
+            Transaction,
+            and_(
+                Transaction.category_id == Category.id,
+                Transaction.txn_at >= month_start,
+                Transaction.txn_at < next_month,
+                Transaction.direction == "out",
+                Transaction.txn_type != "own_transfer",
+            ),
+        )
+        .where(Category.kind == "expense")
+        .group_by(Category.id, Category.name, Category.sort_order)
+        .order_by(Category.sort_order, Category.name, Category.id)
+    )
+    rows = session.execute(statement).all()
+    return pd.DataFrame(
+        [
+            {
+                "category_id": row.category_id,
+                "category": row.name,
+                "actual_spending": Decimal(row.actual_spending),
+            }
+            for row in rows
+        ],
+        columns=["category_id", "category", "actual_spending"],
+    )
 
 
 def unreviewed_counterparties_df(
@@ -413,8 +469,21 @@ def monthly_cashflow_df(
         ),
         0,
     ).label("savings")
+    uncategorized_income = func.coalesce(
+        func.sum(
+            case(
+                (
+                    (Transaction.direction == "in")
+                    & Transaction.category_id.is_(None),
+                    Transaction.amount,
+                ),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("uncategorized_income")
     statement = (
-        select(year, month, income, expenses, savings)
+        select(year, month, income, expenses, savings, uncategorized_income)
         .select_from(Transaction)
         .outerjoin(Category, Category.id == Transaction.category_id)
         .where(*_dashboard_date_filters(date_from, date_to))
@@ -429,14 +498,106 @@ def monthly_cashflow_df(
                 "income": Decimal(row.income),
                 "expenses": Decimal(row.expenses),
                 "savings": Decimal(row.savings),
+                "uncategorized_income": Decimal(row.uncategorized_income),
                 "net_cash_flow": (
-                    Decimal(row.income) - Decimal(row.expenses) - Decimal(row.savings)
+                    Decimal(row.income)
+                    + Decimal(row.uncategorized_income)
+                    - Decimal(row.expenses)
+                    - Decimal(row.savings)
                 ),
             }
             for row in rows
         ],
-        columns=["month", "income", "expenses", "savings", "net_cash_flow"],
+        columns=[
+            "month",
+            "income",
+            "expenses",
+            "savings",
+            "uncategorized_income",
+            "net_cash_flow",
+        ],
     )
+
+
+def uncategorized_cashflow_totals(
+    session: Session,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+) -> tuple[Decimal, Decimal]:
+    incoming = func.coalesce(
+        func.sum(
+            case(
+                (Transaction.direction == "in", Transaction.amount),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("incoming")
+    outgoing = func.coalesce(
+        func.sum(
+            case(
+                (Transaction.direction == "out", Transaction.amount),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("outgoing")
+    statement = (
+        select(incoming, outgoing)
+        .select_from(Transaction)
+        .outerjoin(Category, Category.id == Transaction.category_id)
+        .where(
+            *_dashboard_date_filters(date_from, date_to),
+            Transaction.category_id.is_(None),
+        )
+    )
+    row = session.execute(statement).one()
+    return Decimal(row.incoming), Decimal(row.outgoing)
+
+
+def internal_transfer_totals(
+    session: Session,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+) -> tuple[Decimal, Decimal]:
+    incoming = func.coalesce(
+        func.sum(
+            case(
+                (Transaction.direction == "in", Transaction.amount),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("incoming")
+    outgoing = func.coalesce(
+        func.sum(
+            case(
+                (Transaction.direction == "out", Transaction.amount),
+                else_=0,
+            )
+        ),
+        0,
+    ).label("outgoing")
+    conditions = [
+        or_(Transaction.txn_type == "own_transfer", Category.kind == "transfer")
+    ]
+    lower_bound = _as_datetime(date_from)
+    upper_bound = _as_datetime(date_to, end=True)
+    if lower_bound is not None:
+        conditions.append(Transaction.txn_at >= lower_bound)
+    if upper_bound is not None:
+        if isinstance(date_to, datetime):
+            conditions.append(Transaction.txn_at <= upper_bound)
+        else:
+            conditions.append(Transaction.txn_at < upper_bound)
+    statement = (
+        select(incoming, outgoing)
+        .select_from(Transaction)
+        .outerjoin(Category, Category.id == Transaction.category_id)
+        .where(*conditions)
+    )
+    row = session.execute(statement).one()
+    return Decimal(row.incoming), Decimal(row.outgoing)
 
 
 def expense_categories_df(

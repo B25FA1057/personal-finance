@@ -1,7 +1,7 @@
-# Personal Finance Tool — Build Prompts for Free AI Coding Agents
+﻿# Personal Finance Tool â€” Build Prompts for Free AI Coding Agents
 
 16 prompts, used in order. Each prompt builds one small piece and ends with a check you run yourself.
-Expected build time: 1–3 evenings.
+Expected build time: 1â€“3 evenings.
 
 ---
 
@@ -10,10 +10,10 @@ Expected build time: 1–3 evenings.
 1. **One prompt = one new chat.** Fresh chats use far less of your free quota than long ones, and agents make fewer mistakes.
 2. **Always paste the CONTEXT block first**, then the step prompt, in the same message.
 3. **Agent choice**
-   - Best: **GitHub Copilot Free in VS Code, Agent mode** — it can see and write your project files directly.
+   - Best: **GitHub Copilot Free in VS Code, Agent mode** â€” it can see and write your project files directly.
    - Chat-only agents (ChatGPT, Gemini, Claude free web): also paste the files listed under "Files the agent needs" (copy their contents in). They reply with code; you save it into the files yourself.
-   - Spread steps across agents when you hit a daily limit — the prompts are self-contained, so switching is safe.
-4. **After every step:** run the CHECK command. If it passes → `git add . && git commit -m "step N"`. If it fails → use the **FIX prompt** (bottom of this file) in a new chat.
+   - Spread steps across agents when you hit a daily limit â€” the prompts are self-contained, so switching is safe.
+4. **After every step:** run the CHECK command. If it passes â†’ `git add . && git commit -m "step N"`. If it fails â†’ use the **FIX prompt** (bottom of this file) in a new chat.
 5. **Privacy:** never paste your real bank statement, real account numbers or real names into a free AI. The prompts use a fake test statement. Your real accounts are entered later in the app's Settings page, on your own PC.
 6. If an answer is cut off, say: `Continue exactly where you stopped. Output only the remaining files.`
 
@@ -43,35 +43,35 @@ OUTPUT RULES: Give complete file contents only for the files I ask for, each und
 
 ---
 
-## STEP 1 — Project skeleton
+## STEP 1 â€” Project skeleton
 
 ```text
 [paste CONTEXT block]
 
 TASK: Create the project skeleton.
 Files to create:
-1. requirements.txt — pinned compatible versions: sqlalchemy>=2.0,<2.1; psycopg[binary]>=3.1; pandas>=2.2; openpyxl>=3.1; streamlit>=1.38; plotly>=5.22; python-dotenv>=1.0; pytest>=8.
+1. requirements.txt â€” pinned compatible versions: sqlalchemy>=2.0,<2.1; psycopg[binary]>=3.1; pandas>=2.2; openpyxl>=3.1; streamlit>=1.38; plotly>=5.22; python-dotenv>=1.0; pytest>=8.
 2. .env.example:
    DATABASE_URL=postgresql+psycopg://postgres:CHANGE_ME@localhost:5432/finance
    TEST_DATABASE_URL=postgresql+psycopg://postgres:CHANGE_ME@localhost:5432/finance_test
    PG_DUMP_PATH=C:\Program Files\PostgreSQL\16\bin\pg_dump.exe
-3. .gitignore — Python defaults plus .env, backups/, *.xlsx except tests/fixtures/*.xlsx is generated so ignore it too, .venv/.
-4. core/__init__.py, core/parsers/__init__.py, tests/__init__.py — empty.
+3. .gitignore â€” Python defaults plus .env, backups/, *.xlsx except tests/fixtures/*.xlsx is generated so ignore it too, .venv/.
+4. core/__init__.py, core/parsers/__init__.py, tests/__init__.py â€” empty.
 5. core/config.py:
    - load .env with python-dotenv (from project root, path-independent of cwd).
    - DATABASE_URL: str, TEST_DATABASE_URL: str | None, PG_DUMP_PATH: str | None.
-   - QPAY_FEE_ACCOUNTS: frozenset[str] = frozenset({"2015113727"})
+   - QPAY_FEE_ACCOUNTS: optional comma-separated account identifiers supplied by the user; leave empty by default.
    - FEE_LINK_WINDOW_SECONDS = 15 ; CARD_REF_TOLERANCE_SECONDS = 5
    - Raise a clear RuntimeError if DATABASE_URL missing.
-6. start.bat — cd to its own folder, activate .venv\Scripts\activate.bat, run: streamlit run app.py
-7. README.md — short: setup (python -m venv .venv, pip install -r requirements.txt, copy .env.example to .env and edit, python -m core.seed, start.bat), run tests (pytest -q).
+6. start.bat â€” cd to its own folder, activate .venv\Scripts\activate.bat, run: streamlit run app.py
+7. README.md â€” short: setup (python -m venv .venv, pip install -r requirements.txt, copy .env.example to .env and edit, python -m core.seed, start.bat), run tests (pytest -q).
 
 CHECK I will run: python -m venv .venv ; .venv\Scripts\activate ; pip install -r requirements.txt ; python -c "import core.config as c; print(c.DATABASE_URL)"
 ```
 
 ---
 
-## STEP 2 — Database models
+## STEP 2 â€” Database models
 
 ```text
 [paste CONTEXT block]
@@ -84,7 +84,7 @@ core/db.py:
 - get_session(url: str | None = None) -> Session (sessionmaker, expire_on_commit=False).
 - init_db(url: str | None = None) -> None: imports core.models then Base.metadata.create_all.
 
-core/models.py — exactly these tables (SQLAlchemy 2 Mapped/mapped_column, server defaults where noted):
+core/models.py â€” exactly these tables (SQLAlchemy 2 Mapped/mapped_column, server defaults where noted):
 banks: id PK, code str(20) unique not null, name str(100).
 accounts: id PK, bank_id FK banks.id, account_no str(34) unique not null, iban str(34) null, currency str(3) default "MNT", holder_name str(200) null, label str(100) null.
 own_accounts: id PK, account_no str(34) unique not null, label str(100) null.   # my other accounts (any bank) used to detect transfers between my own accounts
@@ -107,7 +107,7 @@ CHECK: python -c "from core.db import init_db; init_db(); print('ok')"  then con
 
 ---
 
-## STEP 3 — Default categories and starter rules
+## STEP 3 â€” Default categories and starter rules
 
 ```text
 [paste CONTEXT block]
@@ -119,7 +119,7 @@ TASK: Create core/seed.py, runnable as `python -m core.seed`. Idempotent (runnin
 2. Insert bank: code "GOLOMT", name "Golomt Bank".
 3. Categories (name, kind), all is_default=True, sort_order in listed order:
    income: Self-earned, Gift / donation received, Reimbursement from others, Refund, Interest, Other income
-   expense: Groceries, Dining & cafés, Personal care, Healthcare, Transport, Phone & internet, Subscriptions & online, Fitness, Shopping, Education & printing, Housing & utilities, Entertainment, Gifts given, Transfers to people, Bank fees, Other expense
+   expense: Groceries, Dining & cafÃ©s, Personal care, Healthcare, Transport, Phone & internet, Subscriptions & online, Fitness, Shopping, Education & printing, Housing & utilities, Entertainment, Gifts given, Transfers to people, Bank fees, Other expense
    savings: Savings
    transfer: Own account transfer
 4. Rules (priority, field, match_type, pattern, category name):
@@ -131,8 +131,8 @@ TASK: Create core/seed.py, runnable as `python -m core.seed`. Idempotent (runnin
    (60,'merchant','startswith','CU-','Groceries')
    (60,'merchant','contains','APPLE','Subscriptions & online')
    (60,'merchant','contains','GYM','Fitness')
-   (60,'merchant','contains','KFC','Dining & cafés')
-   (60,'merchant','contains','COFF','Dining & cafés')
+   (60,'merchant','contains','KFC','Dining & cafÃ©s')
+   (60,'merchant','contains','COFF','Dining & cafÃ©s')
 5. Print counts inserted.
 
 CHECK: python -m core.seed  (run twice; second run inserts 0)
@@ -140,7 +140,7 @@ CHECK: python -m core.seed  (run twice; second run inserts 0)
 
 ---
 
-## STEP 4 — Fake test statement (fixture)
+## STEP 4 â€” Fake test statement (fixture)
 
 ```text
 [paste CONTEXT block]
@@ -148,37 +148,15 @@ CHECK: python -m core.seed  (run twice; second run inserts 0)
 TASK: Create tests/fixtures/make_golomt_fixture.py with function build(path: Path) -> Path that writes a fake Golomt statement .xlsx using openpyxl, and a __main__ that writes tests/fixtures/golomt_sample.xlsx. Also create tests/conftest.py with a session fixture `golomt_xlsx` that calls build() into tmp_path_factory and returns the path.
 
 Exact layout (single sheet titled "OperativeAccountStatementRaw"). All cell values are STRINGS except numeric amounts/balances which are floats; empty amount cells are "" (empty string). Dates are ISO strings exactly as given.
-Row 1 (11 cells): "Хуулганы огноо","2026-10-14","ДАНСНЫ ХУУЛГА","Харилцагчийн нэр","ТЕСТ ","Гүйлгээний огноо","2026-09-14 - 2026-10-14","Дансны дугаар","1800000001 [MNT]","IBAN","MN00 0015 0018 0000 0001"
-Row 2: "Гүйлгээний огноо","Эхний үлдэгдэл","Зарлага","Орлого","Эцсийн үлдэгдэл","Гүйлгээний утга","Харьцсан данс"
-Rows 3+ (columns: date | balance_before | out | in | balance_after | description | counterparty_account), in THIS order:
-2026-09-14T13:37:46 | 150000.00 |  | 20000 | 170000.00 | O-ТЕСТ ХЭРЭГЛЭГЧ | 5000000001
-2026-09-14T13:37:51 | 170000.00 | 50 |  | 169950.00 | EASYINFO fee for S11111111,2026-09-14 |
-2026-09-14T13:39:40 | 169950.00 | 50 |  | 169900.00 | EASYINFO fee for BOM20260914133933528613,2026-09-1 |
-2026-09-15T10:38 | 169900.00 | 8500 |  | 161400.00 | 400000******1111:14-09-2026 13:39:34:BOM:SEZIS BUF |
-2026-09-15T20:53:40 | 161400.00 | 5000 |  | 156400.00 | SY5000 99112233!F | 8115006437
-2026-09-16T10:48:43 | 156400.00 | 5000 |  | 151400.00 | 400000******2222:15-09-2026 06:42:27:POS:UBCARD AP |
-2026-09-21T10:04:51 | 151400.00 |  | 95000 | 246400.00 | I-БАТ ДОРЖ | 5402600001
-2026-09-26T13:40:31 | 246400.00 | 97070 |  | 149330.00 | 400000******1111:25-09-2026 16:57:20:POS:MILD COSM |
-2026-09-29T12:40:54 | 149330.00 | 200 |  | 149130.00 | Charges for PORD Customer Payment :000658547340 | MN440032005006000001
-2026-09-29T12:40:54 | 149130.00 | 17500 |  | 131630.00 | SocialPay гүйлгээ,ЦЭЦЭГ БОЛД,ХАС | MN440032005006000001
-2026-09-29T13:27:25 | 131630.00 |  | 52500 | 184130.00 | ШИЛЖҮҮЛЭГЧ ЦЭЦЭГ-ЦЭЦЭГ БОЛД | 5006000001
-2026-10-01T17:12:04 | 184130.00 | 72981.95 |  | 111148.05 | 400000******1111:29-09-2026 13:28:49:MCI:APPLE COM |
-2026-10-04T13:08:04 | 111108.05 | 3960 |  | 107148.05 | qpay 101782630891166, ccp-2494a138- 40a0 | MN680005005021900000
-2026-10-04T13:08:04 | 111148.05 | 40 |  | 111108.05 | QPAY 335818730921540 ТЕСТ ХХК 4000 TRX | 2015113727
-2026-10-08T21:01:02 | 107148.05 |  | 110000 | 217148.05 | O-БААТАР САРУУЛ | 5032300001
-2026-10-09T10:02:06 | 217148.05 | 106500 |  | 110648.05 | 400000******1111:08-10-2026 21:01:13:BOM:KFC ZURAG |
-2026-10-09T12:57:13 | 110648.05 | 25350 |  | 85298.05 | 400000******1111:07-10-2026 14:12:55:POS:CU-281 KH |
-2026-10-10T11:30:02 | 85298.05 | 3000 |  | 82298.05 | 99000000!OD3DAY!F | 2020001511
-2026-10-11T13:50:52 | 82298.05 | 4950 |  | 77348.05 | 400000******1111:09-10-2026 15:06:07:POS:CU-24 SHO |
-2026-10-14T09:40:25 | 77348.05 | 12700 |  | 64648.05 | 400000******1111:13-10-2026 13:09:39:POS:SEZS - TS |
-(empty cell = "" ; note two rows are intentionally out of balance order and one date has no seconds — keep exactly as given.)
+The original statement rows are omitted. Use locally generated synthetic fixture data with generic names and identifiers; never include real transaction details in prompts.
+(empty cell = "" ; note two rows are intentionally out of balance order and one date has no seconds â€” keep exactly as given.)
 
-CHECK: python tests/fixtures/make_golomt_fixture.py  → open the xlsx and eyeball it.
+CHECK: python tests/fixtures/make_golomt_fixture.py  â†’ open the xlsx and eyeball it.
 ```
 
 ---
 
-## STEP 5 — Golomt parser
+## STEP 5 â€” Golomt parser
 
 ```text
 [paste CONTEXT block]
@@ -193,28 +171,25 @@ base.py:
 class BankParser(ABC): bank_code: ClassVar[str]; bank_name: ClassVar[str]; @abstractmethod detect(self, wb: openpyxl.Workbook) -> bool; @abstractmethod parse(self, wb) -> ParsedStatement
 Helpers in base.py: to_decimal(v) -> Decimal | None ("" / None -> None; strings with commas/spaces ok; quantize 0.01), parse_dt(v) -> datetime (accepts datetime objects or ISO strings with or without seconds, uses datetime.fromisoformat after strip).
 
-golomt.py — GolomtParser(BankParser), bank_code "GOLOMT", bank_name "Golomt Bank":
+golomt.py â€” GolomtParser(BankParser), bank_code "GOLOMT", bank_name "Golomt Bank":
 - Use wb.active sheet.
-- detect(): True only if row 2 cell A == "Гүйлгээний огноо" AND row 1 contains label "IBAN" whose next cell, with spaces removed, has chars [4:8] == "0015".
-- Row 1 is label/value pairs: find a label cell then take the cell immediately to its right. Labels: "Харилцагчийн нэр"->holder_name (strip), "Дансны дугаар"->account_no (text before " [", strip) and currency (inside brackets, default MNT), "IBAN"->iban (spaces removed), "Гүйлгээний огноо" (in row 1 only)->period "YYYY-MM-DD - YYYY-MM-DD" -> period_from/period_to.
+- detect(): True only if row 2 cell A == "Ð“Ò¯Ð¹Ð»Ð³ÑÑÐ½Ð¸Ð¹ Ð¾Ð³Ð½Ð¾Ð¾" AND row 1 contains label "IBAN" whose next cell, with spaces removed, has chars [4:8] == "0015".
+- Row 1 is label/value pairs: find a label cell then take the cell immediately to its right. Labels: "Ð¥Ð°Ñ€Ð¸Ð»Ñ†Ð°Ð³Ñ‡Ð¸Ð¹Ð½ Ð½ÑÑ€"->holder_name (strip), "Ð”Ð°Ð½ÑÐ½Ñ‹ Ð´ÑƒÐ³Ð°Ð°Ñ€"->account_no (text before " [", strip) and currency (inside brackets, default MNT), "IBAN"->iban (spaces removed), "Ð“Ò¯Ð¹Ð»Ð³ÑÑÐ½Ð¸Ð¹ Ð¾Ð³Ð½Ð¾Ð¾" (in row 1 only)->period "YYYY-MM-DD - YYYY-MM-DD" -> period_from/period_to.
 - Rows 3+: stop at first row whose column A is empty. out cell non-empty -> direction "out", amount=out; else in -> "in". Skip a row with both empty (add warning). counterparty_account: stripped string or None if empty.
 - Validation (append to warnings, never raise): per row, balance_before -/+ amount must equal balance_after (report row number); and first row balance_before + sum(in) - sum(out) must equal last row balance_after.
 
 registry.py: PARSERS: list[BankParser] = [GolomtParser()]; detect_parser(wb) -> BankParser (raise ValueError("Unsupported statement format") if none); load_workbook_from_bytes(data: bytes) -> Workbook (openpyxl, data_only=True).
 
 tests/test_golomt_parser.py (use golomt_xlsx fixture):
-- detect True; a workbook with different A2 -> False.
-- account_no "1800000001", currency "MNT", iban "MN000015001800000001", holder_name "ТЕСТ", period 2026-09-14..2026-10-14.
-- 20 transactions; sum in == Decimal("277500.00"); sum out == Decimal("362851.95"); warnings == [].
-- row 4 posted_at == datetime(2026,9,15,10,38).
-- first txn direction "in", amount 20000, counterparty_account "5000000001".
+- Validate aggregate behavior using synthetic fixture data; do not include real account, merchant, or transaction details in this guide.
+- first txn direction "in", amount 20000, counterparty_account "[synthetic identifier]".
 
 CHECK: pytest -q tests/test_golomt_parser.py
 ```
 
 ---
 
-## STEP 6 — Description enrichment and fee linking
+## STEP 6 â€” Description enrichment and fee linking
 
 ```text
 [paste CONTEXT block]
@@ -226,6 +201,10 @@ TASK: Create core/enrich.py and tests/test_enrich.py. Pure functions, no DB.
 @dataclass EnrichedTxn: raw: RawTxn; txn_at: datetime; txn_type: str; card_mask: str | None; channel: str | None; merchant: str | None; counterparty_account: str | None (normalized); counterparty_key: str | None; counterparty_kind: str | None; counterparty_name: str | None; fee_ref: str | None; parent_index: int | None = None
 
 normalize_account(s: str | None) -> str | None: strip; empty -> None; if matches ^MN\d{2}(\d{4})(\d{12})$ return group2.lstrip("0"); else return s.
+CARD_RE = r"^(\d{6}\*+\d{4}):(\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}):([A-Z]+):(.+)$"  (time inside is DD-MM-YYYY HH:MM:SS)
+
+enrich(t: RawTxn, my_accounts: set[str]) -> EnrichedTxn. Default txn_at = posted_at. acc = normalize_account(t.counterparty_account). d = description.strip(), U = d.upper(). First match wins:
+1. U startswith "EASYINFO FEE FOR" -> fee; key "FEE:EASYINFO", kind bank_fee, name "SMS alert fee"; fee_ref = token after "for " up to the comma, stripped.
 normalize_merchant(s) -> str: upper, strip, collapse internal whitespace to single space.
 CARD_RE = r"^(\d{6}\*+\d{4}):(\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2}):([A-Z]+):(.+)$"  (time inside is DD-MM-YYYY HH:MM:SS)
 
@@ -234,12 +213,12 @@ enrich(t: RawTxn, my_accounts: set[str]) -> EnrichedTxn. Default txn_at = posted
 2. U startswith "CHARGES FOR PORD" -> fee; key "FEE:PORD", kind bank_fee, name "Transfer fee".
 3. U startswith "QPAY" and acc in config.QPAY_FEE_ACCOUNTS -> fee; key "FEE:QPAY", kind bank_fee, name "QPay fee".
 4. CARD_RE match -> card; card_mask, txn_at = purchase time, channel, merchant = normalize_merchant(group4); key "M:"+merchant, kind merchant, name merchant.
-5. U startswith "SOCIALPAY ГҮЙЛГЭЭ," and direction out -> p2p_out; name = 2nd comma part stripped; kind person.
+5. U startswith "SOCIALPAY Ð“Ò®Ð™Ð›Ð“Ð­Ð­," and direction out -> p2p_out; name = 2nd comma part stripped; kind person.
 6. U startswith "QPAY" -> qpay; kind biller; name "QPay " + acc (or "QPay").
 7. d endswith "!F" -> topup; kind biller; name "Mobile top-up".
 8. direction in and acc -> p2p_in; name = text after the LAST "-" stripped (whole text if no "-"); kind person.
 9. else other; kind other; name = d[:60].
-Key for 5–9 = "A:"+acc if acc else ("QPAY" for qpay, "OTHER:"+name otherwise).
+Key for 5â€“9 = "A:"+acc if acc else ("QPAY" for qpay, "OTHER:"+name otherwise).
 Then: if acc in my_accounts and txn_type in (p2p_in, p2p_out, other) -> txn_type own_transfer, kind own_account.
 
 link_fees(items: list[EnrichedTxn]) -> None: sets parent_index on fee items (indexes into the list), never on non-fees:
@@ -247,20 +226,20 @@ link_fees(items: list[EnrichedTxn]) -> None: sets parent_index on fee items (ind
 - FEE:EASYINFO with fee_ref starting "POS"/"BOM"/"MCI": parse YYYYMMDDHHMMSS from ref chars [3:17]; parent = card item with same channel and |txn_at - ref_time| <= config.CARD_REF_TOLERANCE_SECONDS.
 - Other FEE:EASYINFO: parent = nearest earlier non-fee item with 0 <= fee.posted_at - item.posted_at <= config.FEE_LINK_WINDOW_SECONDS.
 
-tests/test_enrich.py using the golomt_xlsx fixture + GolomtParser, my_accounts={"5000000001"}:
+tests/test_enrich.py using the golomt_xlsx fixture + GolomtParser, my_accounts={"[synthetic identifier]"}:
 - txn_type counts: card 8, fee 4, p2p_in 3, own_transfer 1, p2p_out 1, qpay 1, topup 2.
-- 8 distinct merchants including "SEZIS BUF","SEZS - TS","CU-281 KH".
-- SEZIS BUF txn_at == datetime(2026,9,14,13,39,34).
-- normalize_account("MN440032005006000001") == "5006000001".
-- SocialPay p2p_out key == "A:5006000001" and the p2p_in "ШИЛЖҮҮЛЭГЧ ЦЭЦЭГ-ЦЭЦЭГ БОЛД" has the same key, name "ЦЭЦЭГ БОЛД".
-- after link_fees: S11111111 fee -> first row; BOM20260914133933 fee -> SEZIS BUF row; PORD fee -> SocialPay row; QPAY 40 fee -> qpay 3960 row.
+- 8 distinct merchants including "Example Shop","SEZS - TS","CU-281 KH".
+- Example Shop txn_at == datetime(2026,9,14,13,39,34).
+- normalize_account("MN440032005006000001") == "[synthetic identifier]".
+- SocialPay p2p_out key == "A:[synthetic identifier]" and the p2p_in "Ð¨Ð˜Ð›Ð–Ò®Ò®Ð›Ð­Ð“Ð§ Ð¦Ð­Ð¦Ð­Ð“-Ð¦Ð­Ð¦Ð­Ð“ Ð‘ÐžÐ›Ð”" has the same key, name "Ð¦Ð­Ð¦Ð­Ð“ Ð‘ÐžÐ›Ð”".
+- after link_fees: S11111111 fee -> first row; BOM20260914133933 fee -> Example Shop row; PORD fee -> SocialPay row; QPAY 40 fee -> qpay 3960 row.
 
 CHECK: pytest -q tests/test_enrich.py
 ```
 
 ---
 
-## STEP 7 — Duplicate detection and importer
+## STEP 7 â€” Duplicate detection and importer
 
 ```text
 [paste CONTEXT block]
@@ -284,13 +263,13 @@ import_file(session: Session, data: bytes, file_name: str) -> ImportResult:
 6. Call core.classify.classify_transactions(session, [new txn ids]) if module core.classify exists (import inside try/except ImportError so this step works before step 8).
 7. Fill batch counts, commit, return result. On any exception: rollback and re-raise.
 
-conftest db_session fixture: skip test if TEST_DATABASE_URL not set; init_db(TEST_DATABASE_URL) after drop_all; run core.seed logic against the test DB (refactor core/seed.py only if needed so seed(session) can be called — if you change seed.py output it in full); yield session; close.
+conftest db_session fixture: skip test if TEST_DATABASE_URL not set; init_db(TEST_DATABASE_URL) after drop_all; run core.seed logic against the test DB (refactor core/seed.py only if needed so seed(session) can be called â€” if you change seed.py output it in full); yield session; close.
 
 tests/test_importer.py:
 - first import: new_rows 20, duplicate_rows 0, warnings [].
 - same bytes again: already_imported True.
 - a second, different file containing the same rows (rebuild fixture then change cell A1's neighbour B1 to "2026-10-15" so sha differs): new_rows 0, duplicate_rows 20.
-- counterparty with key "M:SEZIS BUF" exists with reviewed False; "FEE:EASYINFO" reviewed True.
+- counterparty with key "M:Example Shop" exists with reviewed False; "FEE:EASYINFO" reviewed True.
 - the PORD fee transaction has parent_txn_id = id of SocialPay transaction.
 
 CHECK: pytest -q
@@ -298,7 +277,7 @@ CHECK: pytest -q
 
 ---
 
-## STEP 8 — Classification engine
+## STEP 8 â€” Classification engine
 
 ```text
 [paste CONTEXT block]
@@ -317,9 +296,9 @@ Functions:
 - set_counterparty_category(session, counterparty_id: int, category_id: int | None, apply_existing: bool = True) -> int: sets default_category_id, reviewed=True; if apply_existing re-classifies that counterparty's non-manual txns; commits; returns count changed.
 - reapply_all(session) -> int: classify_transactions(None) + commit.
 
-tests/test_classify.py (db_session; FIRST insert OwnAccount(account_no="5000000001") and commit, THEN import the fixture):
+tests/test_classify.py (db_session; FIRST insert OwnAccount(account_no="[synthetic identifier]") and commit, THEN import the fixture):
 - after import, all 4 fee txns have category "Bank fees" source 'rule'; own_transfer txn -> "Own account transfer"; CU-281 KH -> "Groceries" (rule).
-- set_counterparty_category(M:SEZIS BUF -> "Dining & cafés") -> its txn source 'counterparty'.
+- set_counterparty_category(M:Example Shop -> "Dining & cafÃ©s") -> its txn source 'counterparty'.
 - set_manual_category on the KFC txn to "Entertainment", then reapply_all -> still "Entertainment"/'manual'.
 - counterparty default beats rule: set M:CU-281 KH default "Shopping" -> its txn becomes "Shopping".
 
@@ -328,7 +307,7 @@ CHECK: pytest -q
 
 ---
 
-## STEP 9 — Shared queries + app shell + Upload page
+## STEP 9 â€” Shared queries + app shell + Upload page
 
 ```text
 [paste CONTEXT block]
@@ -352,12 +331,12 @@ pages/1_Upload.py:
 - After import, if any new_counterparty_ids: st.success("N new merchants/people to classify") + st.page_link to Review.
 - Below: import history table (batches_df).
 
-CHECK: start.bat → upload tests/fixtures/golomt_sample.xlsx (after running python -m core.seed). Upload again → "already imported".
+CHECK: start.bat â†’ upload tests/fixtures/golomt_sample.xlsx (after running python -m core.seed). Upload again â†’ "already imported".
 ```
 
 ---
 
-## STEP 10 — Review page (classify new merchants)
+## STEP 10 â€” Review page (classify new merchants)
 
 ```text
 [paste CONTEXT block]
@@ -370,14 +349,14 @@ TASK: Create pages/2_Review.py.
 - st.data_editor with columns: display_name (read-only), kind (read-only), txn_count, total_out, total_in (read-only, formatted with thousands separator, 0 decimals), sample_description (read-only), suggestion = current_category (read-only), category (st.column_config.SelectboxColumn, options = category_options + "", default = default_category or current_category), apply_to_existing (CheckboxColumn, default True). Hide id/key. Use key="review_editor".
 - Button "Save classifications": for each row where category is non-empty -> set_counterparty_category(id, category_id, apply_existing). Rows left empty stay unreviewed. Show count saved, then st.rerun().
 - Button "Accept all suggestions": for rows with suggestion and empty category -> save suggestion.
-- Under the table, an expander per counterparty is NOT needed; instead a selectbox "Show transactions for…" listing display_names, showing that counterparty's transactions (txn_at, amount, direction, description).
+- Under the table, an expander per counterparty is NOT needed; instead a selectbox "Show transactions forâ€¦" listing display_names, showing that counterparty's transactions (txn_at, amount, direction, description).
 
-CHECK: open Review page → classify SEZIS BUF as "Dining & cafés" → it disappears; Transactions in DB show source 'counterparty'.
+CHECK: open Review page â†’ classify Example Shop as "Dining & cafÃ©s" â†’ it disappears; Transactions in DB show source 'counterparty'.
 ```
 
 ---
 
-## STEP 11 — Transactions page (manual classification)
+## STEP 11 â€” Transactions page (manual classification)
 
 ```text
 [paste CONTEXT block]
@@ -385,19 +364,19 @@ CHECK: open Review page → classify SEZIS BUF as "Dining & cafés" → it disap
 Files the agent needs: core/queries.py, core/classify.py, app.py.
 
 TASK: Create pages/3_Transactions.py.
-- Sidebar filters: date range (default: first day of current month minus 2 months → today), accounts multiselect, categories multiselect (+ "Uncategorized" option), txn_type multiselect, text search, checkbox "Hide fees" (default on).
+- Sidebar filters: date range (default: first day of current month minus 2 months â†’ today), accounts multiselect, categories multiselect (+ "Uncategorized" option), txn_type multiselect, text search, checkbox "Hide fees" (default on).
 - Metrics row: total in, total out, net, count, uncategorized count.
 - st.data_editor of transactions_df: editable columns ONLY category (SelectboxColumn with category_options + "") and note (TextColumn). Everything else disabled. amount formatted with thousands separator. category_source shown as small text column.
 - Button "Save changes": compare edited vs original; for changed category -> set_manual_category (empty string -> None); changed note -> update note and commit. Show "Saved N changes", st.rerun().
 - Button "Re-apply rules to all (keeps manual)" -> reapply_all, show count.
 - Download button: filtered data as CSV (utf-8-sig so Cyrillic opens in Excel).
 
-CHECK: change the KFC transaction to "Entertainment" → reload → still there with source manual.
+CHECK: change the KFC transaction to "Entertainment" â†’ reload â†’ still there with source manual.
 ```
 
 ---
 
-## STEP 12 — Dashboard
+## STEP 12 â€” Dashboard
 
 ```text
 [paste CONTEXT block]
@@ -412,14 +391,14 @@ Definitions: income = txns whose category_kind == 'income'; expense = category_k
 4. Top 10 merchants/people by spend (out, excluding fees and transfers).
 5. Line: month-by-month spend for a category chosen in a selectbox.
 6. Table: largest 10 expense transactions.
-Number format: thousands separator, no decimals, "₮" suffix. Charts use_container_width=True. Handle empty data gracefully (st.info).
+Number format: thousands separator, no decimals, "â‚®" suffix. Charts use_container_width=True. Handle empty data gracefully (st.info).
 
 CHECK: open Dashboard with the fixture data; numbers match Transactions page totals.
 ```
 
 ---
 
-## STEP 13 — Settings page
+## STEP 13 â€” Settings page
 
 ```text
 [paste CONTEXT block]
@@ -428,16 +407,16 @@ Files the agent needs: core/models.py, core/queries.py, core/classify.py, app.py
 
 TASK: Create pages/5_Settings.py with st.tabs: "Categories", "Rules", "My accounts", "Imports".
 1. Categories: data_editor (name, kind Selectbox[income,expense,savings,transfer], sort_order), num_rows="dynamic". Save: insert/update; deleting a category is allowed only if no transactions, rules or counterparties use it (else st.error naming the usage count).
-2. Rules: data_editor (priority, field Selectbox, match_type Selectbox, pattern, category Selectbox, active), num_rows="dynamic". Validate regex patterns with re.compile before saving (show error rows). Below: "Test a rule" — text inputs field/match_type/pattern → shows how many existing transactions would match and 10 samples. Button "Save & re-apply rules" → save then reapply_all.
+2. Rules: data_editor (priority, field Selectbox, match_type Selectbox, pattern, category Selectbox, active), num_rows="dynamic". Validate regex patterns with re.compile before saving (show error rows). Below: "Test a rule" â€” text inputs field/match_type/pattern â†’ shows how many existing transactions would match and 10 samples. Button "Save & re-apply rules" â†’ save then reapply_all.
 3. My accounts: data_editor of own_accounts (account_no, label), dynamic rows. Help text: "Add all your own account numbers at any bank. Money moving between them is not counted as income/expense." Save then button "Re-detect own transfers": for txns whose normalized counterparty_account is in own_accounts and txn_type in (p2p_in,p2p_out,other) set txn_type 'own_transfer', move their counterparty kind to own_account/reviewed True, then reapply_all.
-4. Imports: batches_df; select a batch + button "Delete this import" with a confirmation checkbox → deletes batch (cascade deletes its transactions).
+4. Imports: batches_df; select a batch + button "Delete this import" with a confirmation checkbox â†’ deletes batch (cascade deletes its transactions).
 
-CHECK: add 5000000001 as own account → re-detect → that incoming txn shows "Own account transfer".
+CHECK: add [synthetic identifier] as own account â†’ re-detect â†’ that incoming txn shows "Own account transfer".
 ```
 
 ---
 
-## STEP 14 — Backup + final polish
+## STEP 14 â€” Backup + final polish
 
 ```text
 [paste CONTEXT block]
@@ -447,17 +426,17 @@ Files the agent needs: core/config.py, README.md.
 TASK:
 1. scripts/backup.py: run pg_dump (path from config.PG_DUMP_PATH, fallback "pg_dump" on PATH) using DATABASE_URL parsed with sqlalchemy.engine.make_url; pass password via PGPASSWORD env; custom format (-Fc) to backups/finance_YYYYMMDD_HHMM.dump; keep newest 10, delete older; print path. Exit code 1 with clear message on failure.
 2. backup.bat: activate venv, python scripts\backup.py, pause.
-3. Update README.md (full file): setup, daily use (upload → review → check dashboard), backup & restore (pg_restore -d finance --clean file.dump), how to add own accounts, how to add a new bank (point to "core/parsers": create parser class, add to PARSERS, add fixture + test).
+3. Update README.md (full file): setup, daily use (upload â†’ review â†’ check dashboard), backup & restore (pg_restore -d finance --clean file.dump), how to add own accounts, how to add a new bank (point to "core/parsers": create parser class, add to PARSERS, add fixture + test).
 4. In pages/5_Settings.py add nothing. In app.py add nothing.
 
-CHECK: backup.bat → a .dump file appears in backups\.
+CHECK: backup.bat â†’ a .dump file appears in backups\.
 ```
 
 ---
 
-## STEP 15 — Adding another bank (use later, once per bank)
+## STEP 15 â€” Adding another bank (use later, once per bank)
 
-Before using this: open your new bank's statement, copy the header rows + 6–8 transaction rows into a note, and **replace names, account numbers and card digits with fake ones** (keep the structure and the description formats exactly).
+Before using this: open your new bank's statement, copy the header rows + 6â€“8 transaction rows into a note, and **replace names, account numbers and card digits with fake ones** (keep the structure and the description formats exactly).
 
 ```text
 [paste CONTEXT block]
@@ -469,7 +448,7 @@ Sample statement (anonymized; sheet name "<SHEET NAME>"; row numbers as in the f
 <PASTE ROWS HERE, one row per line, cells separated by " | ">
 
 Create:
-1. core/parsers/<code_lowercase>.py — <Name>Parser(BankParser) following the same contract and validation as golomt.py. detect() must not match Golomt files and Golomt's detect must not match this one.
+1. core/parsers/<code_lowercase>.py â€” <Name>Parser(BankParser) following the same contract and validation as golomt.py. detect() must not match Golomt files and Golomt's detect must not match this one.
 2. Add it to PARSERS in registry.py (output full file).
 3. tests/fixtures/make_<code>_fixture.py producing the sample above, and tests/test_<code>_parser.py checking: detect, account_no, row count, sum in, sum out, no warnings.
 4. If the description formats differ from Golomt, extend core/enrich.py with bank-specific rules (enrich receives the bank code as a new optional parameter bank_code: str = "GOLOMT"; existing Golomt behaviour and tests must not change). Output enrich.py in full only if changed.
@@ -500,7 +479,7 @@ Find the root cause and fix it with the smallest change. Output only the changed
 ```text
 [paste CONTEXT block]
 
-Files: <paste the 1–3 files involved>
+Files: <paste the 1â€“3 files involved>
 Change: <one specific change, e.g. "On the Dashboard add a pie chart of expenses by category under chart 3">
 Output only the changed files in full.
 ```

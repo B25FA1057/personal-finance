@@ -31,11 +31,14 @@ c2.metric(
 c3.metric("Needs review", review_count)
 c4.metric("Last import", last_import.strftime("%Y-%m-%d %H:%M") if last_import else "n/a")
 
-nav_upload, nav_review, nav_transactions, nav_dashboard = st.columns(4)
+nav_upload, nav_review, nav_transactions = st.columns(3)
 nav_upload.page_link("pages/1_Upload.py", label="Upload statements")
 nav_review.page_link("pages/2_Review.py", label="Review merchants & people")
 nav_transactions.page_link("pages/3_Transactions.py", label="Browse transactions")
+nav_dashboard, nav_budgets, nav_goals = st.columns(3)
 nav_dashboard.page_link("pages/4_Dashboard.py", label="Open dashboard")
+nav_budgets.page_link("pages/6_Budgets.py", label="Manage budgets")
+nav_goals.page_link("pages/7_Savings_Goals.py", label="Savings goals")
 
 st.subheader("Recent imports")
 if recent_imports.empty:

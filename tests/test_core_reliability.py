@@ -187,9 +187,21 @@ def test_parser_reports_balance_mismatch() -> None:
     assert any("Statement balance does not reconcile" in warning for warning in statement.warnings)
 
 
-def test_full_sample_enrichment_and_fee_linking() -> None:
+def test_full_sample_enrichment_and_fee_linking(monkeypatch: pytest.MonkeyPatch) -> None:
     workbook = load_workbook(BytesIO(_full_sample_bytes()), data_only=True)
     statement = GolomtParser().parse(workbook)
+    qpay_fee = next(
+        txn
+        for txn in statement.transactions
+        if txn.description.upper().startswith("QPAY")
+        and txn.direction == "out"
+        and txn.amount == Decimal("40.00")
+    )
+    assert qpay_fee.counterparty_account is not None
+    monkeypatch.setattr(
+        "core.enrich.QPAY_FEE_ACCOUNTS",
+        frozenset({qpay_fee.counterparty_account}),
+    )
     items = [enrich(txn, {"5000000001"}) for txn in statement.transactions]
     link_fees(items)
 

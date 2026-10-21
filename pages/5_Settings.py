@@ -9,7 +9,15 @@ from sqlalchemy.exc import IntegrityError
 
 from core.classify import reapply_all, rule_matches
 from core.db import get_session
-from core.models import Category, Counterparty, ImportBatch, OwnAccount, Rule, Transaction
+from core.models import (
+    Category,
+    Counterparty,
+    ImportBatch,
+    MonthlyBudget,
+    OwnAccount,
+    Rule,
+    Transaction,
+)
 from core.queries import batches_df, categories_df
 
 
@@ -118,6 +126,12 @@ with categories_tab:
                         )
                     )
                     or 0,
+                    session.scalar(
+                        select(func.count(MonthlyBudget.id)).where(
+                            MonthlyBudget.category_id == category_id
+                        )
+                    )
+                    or 0,
                 )
             )
             if usage_counts[category_id]:
@@ -126,7 +140,7 @@ with categories_tab:
                 )
                 errors.append(
                     f"Cannot delete {category_name!r}: it is referenced {usage_counts[category_id]} "
-                    "time(s) by transactions, rules, counterparties, or subcategories."
+                    "time(s) by transactions, rules, counterparties, subcategories, or budgets."
                 )
 
         if errors:

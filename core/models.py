@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -77,6 +79,38 @@ class Category(Base):
     sort_order: Mapped[int] = mapped_column(default=100, nullable=False)
     children: Mapped[list["Category"]] = relationship(back_populates="parent")
     parent: Mapped[Category | None] = relationship(back_populates="children", remote_side="Category.id")
+
+
+class MonthlyBudget(Base):
+    __tablename__ = "monthly_budgets"
+    __table_args__ = (
+        UniqueConstraint("category_id", "month_start", name="uq_monthly_budget_category_month"),
+        CheckConstraint("amount > 0", name="ck_monthly_budget_amount_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"), nullable=False)
+    month_start: Mapped[Date] = mapped_column(Date, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    category: Mapped[Category] = relationship()
+
+
+class SavingsGoal(Base):
+    __tablename__ = "savings_goals"
+    __table_args__ = (
+        CheckConstraint("target_amount > 0", name="ck_savings_goal_target_positive"),
+        CheckConstraint("current_saved >= 0", name="ck_savings_goal_saved_nonnegative"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    target_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    current_saved: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=Decimal("0.00"))
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    target_date: Mapped[Date] = mapped_column(Date, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class Counterparty(Base):

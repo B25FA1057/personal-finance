@@ -6,16 +6,18 @@ from decimal import Decimal
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 
 from core.db import get_session
-from core.models import Category, Transaction
+from core.models import Transaction
 from core.queries import (
     expense_categories_df,
     expense_trend_df,
+    internal_transfer_totals,
     monthly_cashflow_df,
     top_expenses_df,
     top_merchant_expenses_df,
+    uncategorized_cashflow_totals,
 )
 
 
@@ -62,22 +64,15 @@ with get_session() as session:
             Transaction.txn_type == "fee",
         )
     ) or Decimal("0.00")
-    uncategorized_out = session.scalar(
-        select(func.coalesce(func.sum(Transaction.amount), 0))
-        .select_from(Transaction)
-        .outerjoin(Category, Category.id == Transaction.category_id)
-        .where(
-            Transaction.txn_at >= date_from,
-            Transaction.txn_at < date.fromordinal(date_to.toordinal() + 1),
-            Transaction.direction == "out",
-            Transaction.category_id.is_(None),
-            Transaction.txn_type != "own_transfer",
-            or_(Category.kind != "transfer", Category.kind.is_(None)),
-        )
-    ) or Decimal("0.00")
+    uncategorized_in, uncategorized_out = uncategorized_cashflow_totals(
+        session, date_from, date_to
+    )
+    transfer_in, transfer_out = internal_transfer_totals(
+        session, date_from, date_to
+    )
 
 if monthly.empty:
-    st.info("No categorized income or expenses in this date range.")
+    st.info("No income, expenses, savings, or uncategorized inflows in this date range.")
     income_total = expense_total = savings_total = net_total = Decimal("0.00")
 else:
     income_total = sum(monthly["income"], Decimal("0.00"))
@@ -85,21 +80,36 @@ else:
     savings_total = sum(monthly["savings"], Decimal("0.00"))
     net_total = sum(monthly["net_cash_flow"], Decimal("0.00"))
 
-kpis = st.columns(6)
+kpis = st.columns(7)
 kpis[0].metric("Income", _money(income_total))
 kpis[1].metric("Expenses", _money(expense_total))
 kpis[2].metric("Savings", _money(savings_total))
 kpis[3].metric("Net cash flow", _money(net_total))
 kpis[4].metric("Bank fees", _money(Decimal(str(fees_total))))
-kpis[5].metric("Uncategorized out", _money(Decimal(str(uncategorized_out))))
+kpis[5].metric("Uncategorized in", _money(uncategorized_in))
+kpis[6].metric("Uncategorized out", _money(uncategorized_out))
+
+st.caption(
+    "Transactions identified as transfers by type or category are shown separately "
+    "and excluded from cash-flow totals."
+)
+transfer_columns = st.columns(2)
+transfer_columns[0].metric("Transfers in", _money(transfer_in))
+transfer_columns[1].metric("Transfers out", _money(transfer_out))
 
 st.subheader("Monthly cash flow")
 if monthly.empty:
-    st.info("Classify transactions as income or expense to see monthly cash flow.")
+    st.info("No transactions are available for monthly cash flow in this date range.")
 else:
     monthly_chart = monthly.melt(
         id_vars="month",
-        value_vars=["income", "expenses", "savings", "net_cash_flow"],
+        value_vars=[
+            "income",
+            "expenses",
+            "savings",
+            "uncategorized_income",
+            "net_cash_flow",
+        ],
         var_name="measure",
         value_name="amount",
     )
@@ -109,6 +119,7 @@ else:
             "income": "Income",
             "expenses": "Expenses",
             "savings": "Savings",
+            "uncategorized_income": "Uncategorized inflows",
             "net_cash_flow": "Net cash flow",
         }
     )

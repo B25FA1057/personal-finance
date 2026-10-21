@@ -12,10 +12,12 @@ from core.models import Account, Bank, Base, Category, Counterparty, ImportBatch
 from core.queries import (
     expense_categories_df,
     expense_trend_df,
+    internal_transfer_totals,
     monthly_cashflow_df,
     top_merchant_expenses_df,
     transaction_count,
     transactions_df,
+    uncategorized_cashflow_totals,
     unreviewed_counterparties_df,
 )
 
@@ -249,12 +251,42 @@ def test_dashboard_sql_aggregations_exclude_internal_transfers(db_session: Sessi
         description="Monthly savings",
         amount=Decimal("100.00"),
     )
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 20, 16),
+        category=None,
+        counterparty=counterparty,
+        description="Uncategorized incoming payment",
+        amount=Decimal("75.00"),
+        direction="in",
+    )
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 20, 17),
+        category=None,
+        counterparty=counterparty,
+        description="Uncategorized outgoing payment",
+        amount=Decimal("20.00"),
+    )
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 20, 18),
+        category=None,
+        counterparty=counterparty,
+        description="Uncategorized internal transfer",
+        amount=Decimal("500.00"),
+        direction="in",
+        txn_type="own_transfer",
+    )
     db_session.commit()
 
     monthly = monthly_cashflow_df(db_session, test_date, test_date)
     categories = expense_categories_df(db_session, test_date, test_date)
     trends = expense_trend_df(db_session, date_from=test_date, date_to=test_date)
     merchants = top_merchant_expenses_df(db_session, test_date, test_date)
+    transfer_in, transfer_out = internal_transfer_totals(
+        db_session, test_date, test_date
+    )
 
     assert monthly.to_dict("records") == [
         {
@@ -262,9 +294,71 @@ def test_dashboard_sql_aggregations_exclude_internal_transfers(db_session: Sessi
             "income": Decimal("1000.00"),
             "expenses": Decimal("255.00"),
             "savings": Decimal("100.00"),
-            "net_cash_flow": Decimal("645.00"),
+            "uncategorized_income": Decimal("75.00"),
+            "net_cash_flow": Decimal("720.00"),
         }
     ]
     assert categories.iloc[0]["amount"] == Decimal("255.00")
     assert trends.iloc[0]["amount"] == Decimal("255.00")
     assert merchants.iloc[0]["amount"] == Decimal("250.00")
+    assert transfer_in == Decimal("10500.00")
+    assert transfer_out == Decimal("2000.00")
+
+
+def test_uncategorized_cashflow_includes_inflows_but_excludes_own_transfers(
+    db_session: Session,
+) -> None:
+    counterparty = Counterparty(
+        key="M:UNCATEGORIZED",
+        kind="merchant",
+        display_name="Uncategorized counterparty",
+    )
+    db_session.add(counterparty)
+    db_session.flush()
+    test_date = date(2026, 10, 20)
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 20, 10),
+        category=None,
+        counterparty=counterparty,
+        description="Uncategorized refund",
+        amount=Decimal("25.00"),
+        direction="in",
+    )
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 20, 11),
+        category=None,
+        counterparty=counterparty,
+        description="Uncategorized outgoing transaction",
+        amount=Decimal("8.00"),
+    )
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 20, 12),
+        category=None,
+        counterparty=counterparty,
+        description="Internal transfer",
+        amount=Decimal("500.00"),
+        direction="in",
+        txn_type="own_transfer",
+    )
+    db_session.commit()
+
+    monthly = monthly_cashflow_df(db_session, test_date, test_date)
+    uncat_in, uncat_out = uncategorized_cashflow_totals(
+        db_session, test_date, test_date
+    )
+    internal_in, internal_out = internal_transfer_totals(
+        db_session, test_date, test_date
+    )
+
+    assert len(monthly) == 1
+    assert monthly.iloc[0]["income"] == Decimal("0.00")
+    assert monthly.iloc[0]["uncategorized_income"] == Decimal("25.00")
+    assert monthly.iloc[0]["expenses"] == Decimal("0.00")
+    assert monthly.iloc[0]["net_cash_flow"] == Decimal("25.00")
+    assert uncat_in == Decimal("25.00")
+    assert uncat_out == Decimal("8.00")
+    assert internal_in == Decimal("500.00")
+    assert internal_out == Decimal("0.00")
