@@ -170,6 +170,39 @@ class Transaction(Base):
     counterparty: Mapped[Counterparty | None] = relationship()
 
 
+class CategorizationSuggestion(Base):
+    __tablename__ = "categorization_suggestions"
+
+    transaction_id: Mapped[int] = mapped_column(
+        ForeignKey("transactions.id", ondelete="CASCADE"), primary_key=True
+    )
+    category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"), nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(4, 3), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(12), default="pending", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+    transaction: Mapped[Transaction] = relationship()
+    category: Mapped[Category] = relationship()
+
+
+class ImportCategorizationSummary(Base):
+    __tablename__ = "import_categorization_summaries"
+
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("import_batches.id", ondelete="CASCADE"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    ai_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    rules_classified: Mapped[int] = mapped_column(default=0, nullable=False)
+    counterparties_classified: Mapped[int] = mapped_column(default=0, nullable=False)
+    ai_suggestions: Mapped[int] = mapped_column(default=0, nullable=False)
+    pending_review: Mapped[int] = mapped_column(default=0, nullable=False)
+    errors: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+
+    batch: Mapped[ImportBatch] = relationship()
+
+
 Index("ix_transactions_posted_at", Transaction.posted_at)
 Index("ix_transactions_txn_at", Transaction.txn_at)
 Index("ix_transactions_category_id", Transaction.category_id)

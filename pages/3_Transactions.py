@@ -7,9 +7,10 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import select
 
+from core.ai_categorization import refresh_import_summary
 from core.classify import classify_transactions, reapply_all
 from core.db import get_session
-from core.models import Account, Category, Transaction
+from core.models import Account, CategorizationSuggestion, Category, Transaction
 from core.queries import (
     category_options,
     merchant_options,
@@ -278,6 +279,7 @@ if st.button("Save changes", type="primary"):
                 for error in validation_errors:
                     st.error(error)
             else:
+                batch_ids_to_refresh: set[int] = set()
                 for update in updates:
                     txn_id = update.id
                     txn = current_transactions.get(txn_id)
@@ -298,14 +300,21 @@ if st.button("Save changes", type="primary"):
                             int(new_category_id) if new_category_id is not None else None
                         )
                         txn.category_source = "manual" if new_category_id is not None else "none"
+                        if new_category_id is not None:
+                            suggestion = session.get(CategorizationSuggestion, txn_id)
+                            if suggestion is not None and suggestion.status == "pending":
+                                suggestion.status = "superseded"
                         if new_category_id is None:
                             reclassify_ids.append(txn_id)
+                        batch_ids_to_refresh.add(txn.batch_id)
                         changed_count += 1
                     if txn.note != update.note:
                         txn.note = update.note
                         changed_count += 1
                 if reclassify_ids:
                     classify_transactions(session, list(dict.fromkeys(reclassify_ids)))
+                for batch_id in batch_ids_to_refresh:
+                    refresh_import_summary(session, batch_id)
                 session.commit()
         if not validation_errors:
             st.success(f"Saved {changed_count} change(s).")

@@ -8,7 +8,7 @@ A local personal finance app for importing bank statements, classifying transact
    `python -m venv .venv`
 2. Activate it and install dependencies:
    `pip install -r requirements.txt`
-3. Copy `.env.example` to `.env` and set your PostgreSQL values.
+3. Copy `.env.example` to `.env` and set your PostgreSQL values. Replace the placeholders; do not commit `.env`.
 4. Create the databases in PostgreSQL:
    `CREATE DATABASE finance;`
    `CREATE DATABASE finance_test;`
@@ -43,6 +43,20 @@ Use the transaction filters to narrow by date, account, category, or transaction
 The Transactions page supports description search, merchant/payee filtering, date/category/type filters, and editing descriptions, categories, and transaction types. Results are paginated. Saving a manual category marks it as manual so rule re-application and duplicate statement imports do not overwrite it. The Dashboard uses database-side monthly and category aggregations; own-account transfers are excluded from cash-flow totals.
 
 The Budgets page manages monthly expense-category budgets and reports actual outflows by transaction month, excluding own-account transfers. It displays remaining amounts and warns at 80% and when a budget is exceeded. Savings Goals are tracked separately using manually entered saved amounts; bank transfers are not automatically counted as contributions. Budget and goal currency fields are labels only: the current application does not convert currencies or filter transaction spending by account currency. The planning tables are created by the existing non-destructive SQLAlchemy `create_all` initialization; no existing tables or financial records are removed.
+
+## Optional AI categorization
+
+AI categorization uses the official Google GenAI Python SDK and Gemini API. Create an API key in [Google AI Studio](https://aistudio.google.com/), then put `GEMINI_API_KEY=your-key` in your local `.env`; use a Google AI Studio key. Optionally set `GEMINI_MODEL` (default: `gemini-2.5-flash-lite`). Google's [model guide](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite) describes Gemini 2.5 Flash-Lite as suitable for high-volume classification, and the current [pricing page](https://ai.google.dev/gemini-api/docs/pricing) lists free standard input/output for it. Model access and free-tier quotas vary by project and can change; confirm current availability and [rate limits](https://ai.google.dev/gemini-api/docs/rate-limits) in AI Studio before use.
+
+Before an upload or a manual categorization run sends data, the Upload or Review page requires explicit consent and explains what is shared. The request contains a temporary transaction index, direction, transaction type, normalized merchant when available, and a redacted description. It does not contain account numbers, counterparty account IDs, transaction amounts, or dates. Person-to-person names and account-reference strings are omitted or redacted. Do not enable the consent control unless you are comfortable sending these selected details to Google.
+
+Google's free-tier terms and data handling differ from paid-tier terms. Review the current Gemini API [pricing](https://ai.google.dev/gemini-api/docs/pricing) and [terms](https://ai.google.dev/gemini-api/terms) before sending transaction data; free-tier inputs may be used to improve Google's products.
+
+AI responses are validated against categories already in the database and are saved as pending suggestions. Review each suggestion to accept it, choose another compatible category, or reject it. Accepting a suggestion can optionally create or update an exact-match merchant or description rule. Confirmed categories are not overwritten by later imports or AI runs. Verified own-account transfers are excluded from AI categorization; incoming merchant refunds assigned to an expense category reduce net expenses rather than inflating income. AI/network/format errors leave the transactions available for review.
+
+The application creates two additional tables for suggestion state and import summaries through its existing `create_all` initialization. This adds tables only; it does not rewrite existing transaction rows or re-import statements.
+
+For safe verification, use synthetic statements containing fictitious merchants, dates, amounts, and account identifiers. Run the offline tests first; they mock Gemini and do not call the API. A live test requires a valid API key and explicit consent in the app.
 
 ## Backup and restore
 

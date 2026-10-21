@@ -4,13 +4,22 @@ from dataclasses import dataclass, field
 from io import BytesIO
 
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .ai_categorization import suggest_categories
 from .classify import classify_transactions
 from .dedupe import file_sha256, txn_hash
 from .enrich import EnrichedTxn, enrich, link_fees, normalize_account
-from .models import Account, Bank, Counterparty, ImportBatch, OwnAccount, Transaction
+from .models import (
+    Account,
+    Bank,
+    Counterparty,
+    ImportBatch,
+    ImportCategorizationSummary,
+    OwnAccount,
+    Transaction,
+)
 from .parsers.registry import detect_parser
 
 
@@ -25,17 +34,35 @@ class ImportResult:
     warnings: list[str] = field(default_factory=list)
     new_counterparty_ids: list[int] = field(default_factory=list)
     already_imported: bool = False
+    rules_classified: int = 0
+    counterparties_classified: int = 0
+    ai_suggestions: int = 0
+    pending_review: int = 0
+    errors: list[str] = field(default_factory=list)
+    ai_status: str = "disabled"
 
 
-def import_file(session: Session, data: bytes, file_name: str) -> ImportResult:
+def import_file(
+    session: Session,
+    data: bytes,
+    file_name: str,
+    *,
+    allow_ai: bool = False,
+) -> ImportResult:
     try:
-        return _import_file(session, data, file_name)
+        return _import_file(session, data, file_name, allow_ai=allow_ai)
     except Exception:
         session.rollback()
         raise
 
 
-def _import_file(session: Session, data: bytes, file_name: str) -> ImportResult:
+def _import_file(
+    session: Session,
+    data: bytes,
+    file_name: str,
+    *,
+    allow_ai: bool,
+) -> ImportResult:
     file_hash = file_sha256(data)
     existing_batch = session.execute(
         select(ImportBatch).where(ImportBatch.file_sha256 == file_hash)
@@ -43,14 +70,21 @@ def _import_file(session: Session, data: bytes, file_name: str) -> ImportResult:
     if existing_batch is not None:
         account = session.get(Account, existing_batch.account_id)
         bank = session.get(Bank, account.bank_id) if account and account.bank_id else None
+        summary = session.get(ImportCategorizationSummary, existing_batch.id)
         return ImportResult(
             batch_id=existing_batch.id,
             bank_code=bank.code if bank else "",
             account_no=account.account_no if account else "",
             total_rows=existing_batch.total_rows or 0,
             new_rows=0,
-            duplicate_rows=0,
+            duplicate_rows=existing_batch.total_rows or 0,
             already_imported=True,
+            rules_classified=summary.rules_classified if summary else 0,
+            counterparties_classified=summary.counterparties_classified if summary else 0,
+            ai_suggestions=summary.ai_suggestions if summary else 0,
+            pending_review=summary.pending_review if summary else 0,
+            errors=summary.errors if summary else [],
+            ai_status=summary.ai_status if summary else "disabled",
         )
 
     workbook = load_workbook(BytesIO(data), data_only=True)
@@ -194,8 +228,67 @@ def _import_file(session: Session, data: bytes, file_name: str) -> ImportResult:
 
     batch.new_rows = new_rows
     batch.duplicate_rows = duplicate_rows
+    rules_classified = 0
+    counterparties_classified = 0
+    ai_suggestions = 0
+    errors: list[str] = []
+    ai_status = "disabled"
     if transaction_ids:
         classify_transactions(session, transaction_ids)
+        classified = session.execute(
+            select(Transaction.category_source).where(Transaction.id.in_(transaction_ids))
+        ).scalars().all()
+        rules_classified = sum(source == "rule" for source in classified)
+        counterparties_classified = sum(
+            source == "counterparty" for source in classified
+        )
+
+        uncategorized_ids = session.execute(
+            select(Transaction.id).where(
+                Transaction.id.in_(transaction_ids),
+                Transaction.category_id.is_(None),
+                Transaction.category_source == "none",
+            )
+        ).scalars().all()
+        if allow_ai:
+            ai_result = suggest_categories(session, list(uncategorized_ids))
+            ai_suggestions = ai_result.suggestions
+            if ai_result.error:
+                errors.append(ai_result.error)
+                ai_status = "partial" if ai_suggestions else "failed"
+            elif ai_result.disabled:
+                ai_status = "disabled"
+            else:
+                ai_status = "completed"
+        else:
+            ai_status = "not_consented"
+
+    pending_review = (
+        session.scalar(
+            select(func.count(Transaction.id)).where(
+                Transaction.id.in_(transaction_ids),
+                Transaction.category_id.is_(None),
+                Transaction.txn_type != "own_transfer",
+            )
+        )
+        or 0
+        if transaction_ids
+        else 0
+    )
+    batch_status = "completed_with_errors" if errors else "completed"
+    if batch.id is not None:
+        session.add(
+            ImportCategorizationSummary(
+                batch_id=batch.id,
+                status=batch_status,
+                ai_status=ai_status,
+                rules_classified=rules_classified,
+                counterparties_classified=counterparties_classified,
+                ai_suggestions=ai_suggestions,
+                pending_review=pending_review,
+                errors=errors,
+            )
+        )
 
     session.commit()
     return ImportResult(
@@ -207,4 +300,10 @@ def _import_file(session: Session, data: bytes, file_name: str) -> ImportResult:
         duplicate_rows=duplicate_rows,
         warnings=statement.warnings,
         new_counterparty_ids=new_counterparty_ids,
+        rules_classified=rules_classified,
+        counterparties_classified=counterparties_classified,
+        ai_suggestions=ai_suggestions,
+        pending_review=pending_review,
+        errors=errors,
+        ai_status=ai_status,
     )

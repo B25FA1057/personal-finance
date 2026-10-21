@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 
 from .models import (
     Account,
+    Bank,
     Category,
     Counterparty,
     ImportBatch,
+    ImportCategorizationSummary,
     MonthlyBudget,
     SavingsGoal,
     Transaction,
@@ -452,6 +454,10 @@ def monthly_cashflow_df(
                     (Transaction.direction == "out") & (Category.kind == "expense"),
                     Transaction.amount,
                 ),
+                (
+                    (Transaction.direction == "in") & (Category.kind == "expense"),
+                    -Transaction.amount,
+                ),
                 else_=0,
             )
         ),
@@ -609,17 +615,27 @@ def expense_categories_df(
         select(
             Category.id.label("category_id"),
             Category.name.label("category"),
-            func.sum(Transaction.amount).label("amount"),
+            func.sum(
+                case(
+                    (Transaction.direction == "out", Transaction.amount),
+                    else_=-Transaction.amount,
+                )
+            ).label("amount"),
         )
         .select_from(Transaction)
         .join(Category, Category.id == Transaction.category_id)
         .where(
             *_dashboard_date_filters(date_from, date_to),
-            Transaction.direction == "out",
+            Transaction.direction.in_(["in", "out"]),
             Category.kind == "expense",
         )
         .group_by(Category.id, Category.name)
-        .order_by(func.sum(Transaction.amount).desc(), Category.name)
+        .order_by(func.sum(
+            case(
+                (Transaction.direction == "out", Transaction.amount),
+                else_=-Transaction.amount,
+            )
+        ).desc(), Category.name)
     )
     return pd.DataFrame(
         [
@@ -642,13 +658,19 @@ def expense_trend_df(
 ) -> pd.DataFrame:
     year = extract("year", Transaction.txn_at).label("year")
     month = extract("month", Transaction.txn_at).label("month")
+    net_expenses = func.sum(
+        case(
+            (Transaction.direction == "out", Transaction.amount),
+            else_=-Transaction.amount,
+        )
+    )
     statement = (
-        select(year, month, func.sum(Transaction.amount).label("amount"))
+        select(year, month, net_expenses.label("amount"))
         .select_from(Transaction)
         .join(Category, Category.id == Transaction.category_id)
         .where(
             *_dashboard_date_filters(date_from, date_to),
-            Transaction.direction == "out",
+            Transaction.direction.in_(["in", "out"]),
             Category.kind == "expense",
         )
     )
@@ -714,19 +736,26 @@ def top_merchant_expenses_df(
         Counterparty.display_name,
         "Unspecified",
     ).label("payee")
+    net_expenses = func.sum(
+        case(
+            (Transaction.direction == "out", Transaction.amount),
+            else_=-Transaction.amount,
+        )
+    )
     statement = (
-        select(merchant, func.sum(Transaction.amount).label("amount"))
+        select(merchant, net_expenses.label("amount"))
         .select_from(Transaction)
         .join(Category, Category.id == Transaction.category_id)
         .outerjoin(Counterparty, Counterparty.id == Transaction.counterparty_id)
         .where(
             *_dashboard_date_filters(date_from, date_to),
-            Transaction.direction == "out",
+            Transaction.direction.in_(["in", "out"]),
             Transaction.txn_type != "fee",
             Category.kind == "expense",
         )
         .group_by(merchant)
-        .order_by(func.sum(Transaction.amount).desc(), merchant)
+        .having(net_expenses > 0)
+        .order_by(net_expenses.desc(), merchant)
         .limit(limit)
     )
     return pd.DataFrame(
@@ -744,14 +773,35 @@ def batches_df(session: Session) -> pd.DataFrame:
             ImportBatch.id,
             ImportBatch.imported_at,
             ImportBatch.file_name,
-            Account.account_no,
+            Bank.code.label("bank_code"),
             ImportBatch.period_from,
             ImportBatch.period_to,
             ImportBatch.total_rows,
             ImportBatch.new_rows,
             ImportBatch.duplicate_rows,
+            func.coalesce(ImportCategorizationSummary.status, "legacy").label("status"),
+            func.coalesce(ImportCategorizationSummary.ai_status, "disabled").label(
+                "ai_status"
+            ),
+            func.coalesce(ImportCategorizationSummary.rules_classified, 0).label(
+                "rules_classified"
+            ),
+            func.coalesce(ImportCategorizationSummary.counterparties_classified, 0).label(
+                "counterparties_classified"
+            ),
+            func.coalesce(ImportCategorizationSummary.ai_suggestions, 0).label(
+                "ai_suggestions"
+            ),
+            func.coalesce(ImportCategorizationSummary.pending_review, 0).label(
+                "pending_review"
+            ),
         )
         .outerjoin(Account, Account.id == ImportBatch.account_id)
+        .outerjoin(Bank, Bank.id == Account.bank_id)
+        .outerjoin(
+            ImportCategorizationSummary,
+            ImportCategorizationSummary.batch_id == ImportBatch.id,
+        )
         .order_by(ImportBatch.imported_at.desc(), ImportBatch.id.desc())
     )
     return pd.DataFrame(
@@ -760,11 +810,17 @@ def batches_df(session: Session) -> pd.DataFrame:
             "id",
             "imported_at",
             "file_name",
-            "account_no",
+            "bank_code",
             "period_from",
             "period_to",
             "total_rows",
             "new_rows",
             "duplicate_rows",
+            "status",
+            "ai_status",
+            "rules_classified",
+            "counterparties_classified",
+            "ai_suggestions",
+            "pending_review",
         ],
     )

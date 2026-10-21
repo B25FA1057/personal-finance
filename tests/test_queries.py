@@ -362,3 +362,46 @@ def test_uncategorized_cashflow_includes_inflows_but_excludes_own_transfers(
     assert uncat_out == Decimal("8.00")
     assert internal_in == Decimal("500.00")
     assert internal_out == Decimal("0.00")
+
+
+def test_categorized_refund_reduces_expenses_without_inflating_income(
+    db_session: Session,
+) -> None:
+    expense = Category(name="Dining", kind="expense")
+    counterparty = Counterparty(
+        key="M:TEST SHOP", kind="merchant", display_name="Test Shop"
+    )
+    db_session.add_all([expense, counterparty])
+    db_session.flush()
+    test_date = date(2026, 10, 20)
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 20, 10),
+        category=expense,
+        counterparty=counterparty,
+        description="Restaurant purchase",
+        amount=Decimal("50.00"),
+        direction="out",
+    )
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 20, 11),
+        category=expense,
+        counterparty=counterparty,
+        description="Restaurant refund",
+        amount=Decimal("10.00"),
+        direction="in",
+    )
+    db_session.commit()
+
+    monthly = monthly_cashflow_df(db_session, test_date, test_date)
+    categories = expense_categories_df(db_session, test_date, test_date)
+    trends = expense_trend_df(db_session, date_from=test_date, date_to=test_date)
+    merchants = top_merchant_expenses_df(db_session, test_date, test_date)
+
+    assert monthly.iloc[0]["income"] == Decimal("0.00")
+    assert monthly.iloc[0]["expenses"] == Decimal("40.00")
+    assert monthly.iloc[0]["net_cash_flow"] == Decimal("-40.00")
+    assert categories.iloc[0]["amount"] == Decimal("40.00")
+    assert trends.iloc[0]["amount"] == Decimal("40.00")
+    assert merchants.iloc[0]["amount"] == Decimal("40.00")

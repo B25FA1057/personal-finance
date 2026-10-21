@@ -466,7 +466,7 @@ with imports_tab:
             batch_ids,
             format_func=lambda batch_id: (
                 f"{import_history.loc[import_history['id'] == batch_id, 'file_name'].iloc[0]} "
-                f"— {import_history.loc[import_history['id'] == batch_id, 'account_no'].iloc[0]} "
+                f"— {import_history.loc[import_history['id'] == batch_id, 'bank_code'].iloc[0]} "
                 f"— {import_history.loc[import_history['id'] == batch_id, 'imported_at'].iloc[0]}"
             ),
             key="delete_import_batch",

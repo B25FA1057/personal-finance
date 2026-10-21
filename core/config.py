@@ -11,6 +11,8 @@ load_dotenv(ROOT_DIR / ".env")
 DATABASE_URL: str = os.getenv("DATABASE_URL") or ""
 TEST_DATABASE_URL: str | None = os.getenv("TEST_DATABASE_URL")
 PG_DUMP_PATH: str | None = os.getenv("PG_DUMP_PATH")
+GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY") or None
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite"
 
 QPAY_FEE_ACCOUNTS: frozenset[str] = frozenset(
     account.strip()
