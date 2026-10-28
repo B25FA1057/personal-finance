@@ -1,205 +1,335 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import func, select
 
 from core.db import get_session
-from core.models import Transaction
 from core.queries import (
+    budget_performance_df,
     expense_categories_df,
     expense_trend_df,
     internal_transfer_totals,
+    monthly_uncategorized_outflows_df,
     monthly_cashflow_df,
-    top_expenses_df,
-    top_merchant_expenses_df,
+    transactions_df,
     uncategorized_cashflow_totals,
 )
+
+
+_COLORS = {
+    "income": "#278060",
+    "expenses": "#c76d68",
+    "net": "#526779",
+    "budget": "#9aa9a0",
+}
+
+
+def _period_dates(period: str, today: date) -> tuple[date, date]:
+    if period == "This month":
+        return date(today.year, today.month, 1), today
+    if period == "Last month":
+        end = date(today.year, today.month, 1) - timedelta(days=1)
+        return date(end.year, end.month, 1), end
+    if period == "Last 3 months":
+        month = today.month - 2
+        year = today.year
+        while month < 1:
+            month += 12
+            year -= 1
+        return date(year, month, 1), today
+    return date(today.year, 1, 1), today
 
 
 def _money(value: Decimal) -> str:
     return f"{value:,.0f} ₮"
 
 
-st.title("Dashboard")
+st.title("Overview")
+st.caption("A clear view of your cash flow, spending, and plans.")
+
 today = date.today()
-default_start = date(today.year, today.month, 1)
-for _ in range(6):
-    default_start = (
-        date(default_start.year - 1, 12, 1)
-        if default_start.month == 1
-        else date(default_start.year, default_start.month - 1, 1)
-    )
-
 with st.sidebar:
-    st.header("Dashboard filters")
-    date_range = st.date_input(
-        "Date range",
-        value=(default_start, today),
-        key="dashboard_date_range",
+    st.subheader("Reporting period")
+    selected_period = st.selectbox(
+        "Period",
+        ["This month", "Last month", "Last 3 months", "This year", "Custom"],
+        label_visibility="collapsed",
+        key="dashboard_period",
     )
-
-if not isinstance(date_range, tuple) or len(date_range) != 2:
-    st.info("Choose both a start and end date.")
-    st.stop()
-date_from, date_to = date_range
-if date_from > date_to:
-    st.error("The start date must be on or before the end date.")
-    st.stop()
+    if selected_period == "Custom":
+        selected_range = st.date_input(
+            "Choose dates",
+            value=(date(today.year, 1, 1), today),
+            key="dashboard_custom_range",
+        )
+        if not isinstance(selected_range, tuple) or len(selected_range) != 2:
+            st.info("Choose both a start and end date.")
+            st.stop()
+        date_from, date_to = selected_range
+    else:
+        date_from, date_to = _period_dates(selected_period, today)
+    if date_from > date_to:
+        st.error("The start date must be on or before the end date.")
+        st.stop()
+    st.caption(f"{date_from:%b %d, %Y} — {date_to:%b %d, %Y}")
 
 with get_session() as session:
     monthly = monthly_cashflow_df(session, date_from, date_to)
-    category_spending = expense_categories_df(session, date_from, date_to)
-    top_merchants = top_merchant_expenses_df(session, date_from, date_to)
-    largest_expenses = top_expenses_df(session, date_from, date_to)
-    end_exclusive = date.fromordinal(date_to.toordinal() + 1)
-    fees_total = session.scalar(
-        select(func.coalesce(func.sum(Transaction.amount), 0)).where(
-            Transaction.txn_at >= date_from,
-            Transaction.txn_at < end_exclusive,
-            Transaction.txn_type == "fee",
-        )
-    ) or Decimal("0.00")
-    uncategorized_in, uncategorized_out = uncategorized_cashflow_totals(
+    uncategorized_outflows = monthly_uncategorized_outflows_df(
         session, date_from, date_to
+    )
+    category_spending = expense_categories_df(session, date_from, date_to)
+    trend = expense_trend_df(session, date_from=date_from, date_to=date_to)
+    budgets = budget_performance_df(session, date_from, date_to)
+    recent = transactions_df(
+        session,
+        date_from=date_from,
+        date_to=date_to,
+        limit=8,
     )
     transfer_in, transfer_out = internal_transfer_totals(
         session, date_from, date_to
     )
+    uncategorized_in, uncategorized_out = uncategorized_cashflow_totals(
+        session, date_from, date_to
+    )
 
 if monthly.empty:
-    st.info("No income, expenses, savings, or uncategorized inflows in this date range.")
-    income_total = expense_total = savings_total = net_total = Decimal("0.00")
+    total_income = total_expenses = total_savings = net_cash_flow = Decimal("0.00")
 else:
-    income_total = sum(monthly["income"], Decimal("0.00"))
-    expense_total = sum(monthly["expenses"], Decimal("0.00"))
-    savings_total = sum(monthly["savings"], Decimal("0.00"))
-    net_total = sum(monthly["net_cash_flow"], Decimal("0.00"))
+    total_income = sum(
+        (
+            income + uncategorized
+            for income, uncategorized in zip(
+                monthly["income"], monthly["uncategorized_income"]
+            )
+        ),
+        Decimal("0.00"),
+    )
+    total_expenses = sum(monthly["expenses"], Decimal("0.00"))
+    total_savings = sum(monthly["savings"], Decimal("0.00"))
+    net_cash_flow = (
+        sum(monthly["net_cash_flow"], Decimal("0.00")) - uncategorized_out
+    )
 
-kpis = st.columns(7)
-kpis[0].metric("Income", _money(income_total))
-kpis[1].metric("Expenses", _money(expense_total))
-kpis[2].metric("Savings", _money(savings_total))
-kpis[3].metric("Net cash flow", _money(net_total))
-kpis[4].metric("Bank fees", _money(Decimal(str(fees_total))))
-kpis[5].metric("Uncategorized in", _money(uncategorized_in))
-kpis[6].metric("Uncategorized out", _money(uncategorized_out))
-
+st.markdown("#### Period summary")
+kpis = st.columns(4)
+kpis[0].metric("Total income", _money(total_income))
+kpis[1].metric("Expenses · net of refunds", _money(total_expenses))
+kpis[2].metric("Net cash flow", _money(net_cash_flow))
+kpis[3].metric("Savings moved", _money(total_savings))
+uncategorized_columns = st.columns(2)
+uncategorized_columns[0].metric("Uncategorized money in", _money(uncategorized_in))
+uncategorized_columns[1].metric("Uncategorized money out", _money(uncategorized_out))
 st.caption(
-    "Transactions identified as transfers by type or category are shown separately "
-    "and excluded from cash-flow totals."
+    "Income includes uncategorized inflows. Expenses are net of refunds; "
+    "uncategorized outflows are shown separately and included in net cash flow. "
+    "Savings moved reflects outflows assigned to a savings category."
 )
-transfer_columns = st.columns(2)
-transfer_columns[0].metric("Transfers in", _money(transfer_in))
-transfer_columns[1].metric("Transfers out", _money(transfer_out))
 
-st.subheader("Monthly cash flow")
-if monthly.empty:
-    st.info("No transactions are available for monthly cash flow in this date range.")
+if monthly.empty and category_spending.empty and recent.empty:
+    st.info("No transactions were found for this period. Import a statement to get started.")
 else:
-    monthly_chart = monthly.melt(
-        id_vars="month",
-        value_vars=[
-            "income",
-            "expenses",
-            "savings",
-            "uncategorized_income",
-            "net_cash_flow",
-        ],
-        var_name="measure",
-        value_name="amount",
-    )
-    monthly_chart["amount"] = monthly_chart["amount"].astype(float)
-    monthly_chart["measure"] = monthly_chart["measure"].map(
-        {
-            "income": "Income",
-            "expenses": "Expenses",
-            "savings": "Savings",
-            "uncategorized_income": "Uncategorized inflows",
-            "net_cash_flow": "Net cash flow",
-        }
-    )
-    st.plotly_chart(
-        px.line(monthly_chart, x="month", y="amount", color="measure", markers=True),
-        use_container_width=True,
-    )
-
-left, right = st.columns(2)
-with left:
-    st.subheader("Expenses by category")
-    if category_spending.empty:
-        st.info("No categorized expenses in this range.")
+    st.markdown("#### Monthly cash flow")
+    if monthly.empty:
+        st.info("No cash-flow totals are available for this period.")
     else:
-        chart_data = category_spending.copy()
-        chart_data["amount"] = chart_data["amount"].astype(float)
-        st.plotly_chart(
-            px.bar(
-                chart_data,
+        chart = pd.DataFrame(
+            {
+                "Month": monthly["month"],
+                "Income": [
+                    float(income + uncategorized)
+                    for income, uncategorized in zip(
+                        monthly["income"], monthly["uncategorized_income"]
+                    )
+                ],
+                "Expenses": [float(value) for value in monthly["expenses"]],
+            }
+        ).melt(id_vars="Month", var_name="Type", value_name="Amount")
+        if not uncategorized_outflows.empty:
+            uncat_by_month = dict(
+                zip(uncategorized_outflows["month"], uncategorized_outflows["amount"])
+            )
+            chart = pd.concat(
+                [
+                    chart,
+                    pd.DataFrame(
+                        {
+                            "Month": list(monthly["month"]),
+                            "Type": "Uncategorized outflows",
+                            "Amount": [
+                                float(uncat_by_month.get(month, Decimal("0.00")))
+                                for month in monthly["month"]
+                            ],
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
+        fig = px.bar(
+            chart,
+            x="Month",
+            y="Amount",
+            color="Type",
+            barmode="group",
+            color_discrete_map={
+                "Income": _COLORS["income"],
+                "Expenses": _COLORS["expenses"],
+                "Uncategorized outflows": _COLORS["net"],
+            },
+            labels={"Amount": "Amount (₮)"},
+        )
+        fig.update_layout(
+            margin=dict(l=8, r=8, t=18, b=8),
+            legend_title_text="",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("#### Spending by category")
+        if category_spending.empty:
+            st.info("No categorized expense activity in this period.")
+        else:
+            category_chart = category_spending.copy()
+            category_chart["amount"] = category_chart["amount"].astype(float)
+            fig = px.bar(
+                category_chart,
                 x="amount",
                 y="category",
                 orientation="h",
-                labels={"amount": "Amount", "category": "Category"},
-            ).update_layout(yaxis={"categoryorder": "total ascending"}),
-            use_container_width=True,
-        )
+                color_discrete_sequence=[_COLORS["expenses"]],
+                labels={"amount": "Net expenses (₮)", "category": ""},
+            )
+            fig.update_layout(
+                yaxis={"categoryorder": "total ascending"},
+                margin=dict(l=8, r=8, t=12, b=8),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-with right:
-    st.subheader("Top merchants & people")
-    if top_merchants.empty:
-        st.info("No categorized merchant spend in this range.")
+    with right:
+        st.markdown("#### Spending trend")
+        if trend.empty:
+            st.info("No categorized expense trend is available yet.")
+        else:
+            trend["amount"] = trend["amount"].astype(float)
+            fig = px.line(
+                trend,
+                x="month",
+                y="amount",
+                markers=True,
+                color_discrete_sequence=[_COLORS["net"]],
+                labels={"month": "Month", "amount": "Net expenses (₮)"},
+            )
+            fig.update_layout(
+                margin=dict(l=8, r=8, t=12, b=8),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("#### Budget performance")
+    if budgets.empty:
+        st.info("No monthly budgets are set within this period.")
     else:
-        chart_data = top_merchants.copy()
-        chart_data["amount"] = chart_data["amount"].astype(float)
-        st.plotly_chart(
-            px.bar(chart_data, x="amount", y="payee", orientation="h").update_layout(
-                yaxis={"categoryorder": "total ascending"}
+        st.caption(
+            "Actual outflows include net refunds and exclude internal transfers. "
+            "Budget currencies are labels; amounts are not converted."
+        )
+        st.dataframe(
+            budgets.rename(
+                columns={
+                    "month": "Month",
+                    "category": "Category",
+                    "currency": "Currency",
+                    "budget": "Limit",
+                    "actual": "Actual",
+                }
             ),
             use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Limit": st.column_config.NumberColumn("Limit", format="%,.2f"),
+                "Actual": st.column_config.NumberColumn("Actual", format="%,.2f"),
+            },
         )
+        currencies = budgets["currency"].unique()
+        if len(currencies) == 1:
+            chart_data = budgets.copy()
+            chart_data["label"] = chart_data["month"] + " · " + chart_data["category"]
+            chart_data = chart_data.melt(
+                id_vars="label",
+                value_vars=["budget", "actual"],
+                var_name="Series",
+                value_name="Amount",
+            )
+            chart_data["Amount"] = chart_data["Amount"].astype(float)
+            fig = px.bar(
+                chart_data,
+                x="label",
+                y="Amount",
+                color="Series",
+                barmode="group",
+                color_discrete_map={
+                    "budget": _COLORS["budget"],
+                    "actual": _COLORS["expenses"],
+                },
+                labels={"label": "", "Amount": f"Amount ({currencies[0]})"},
+            )
+            fig.update_layout(
+                margin=dict(l=8, r=8, t=12, b=8),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning(
+                "Budget rows use different currency labels. The chart is hidden to avoid "
+                "misleading cross-currency comparisons."
+            )
 
-st.subheader("Monthly expense trend")
-if category_spending.empty:
-    st.info("No expense categories are available for a trend.")
-else:
-    category_by_name = dict(
-        zip(category_spending["category"], category_spending["category_id"])
-    )
-    selected_category = st.selectbox(
-        "Expense category",
-        options=category_spending["category"].tolist(),
-    )
-    with get_session() as session:
-        trend = expense_trend_df(
-            session=session,
-            category_id=int(category_by_name[selected_category]),
-            date_from=date_from,
-            date_to=date_to,
-        )
-    if trend.empty:
-        st.info("No spending recorded for this category in the selected dates.")
+    st.markdown("#### Recent transactions")
+    if recent.empty:
+        st.info("No transactions in this period.")
     else:
-        trend["amount"] = trend["amount"].astype(float)
-        st.plotly_chart(
-            px.line(trend, x="month", y="amount", markers=True),
+        recent_view = recent[
+            [
+                "txn_at",
+                "merchant",
+                "description",
+                "direction",
+                "signed_amount",
+                "category",
+                "category_source",
+                "txn_type",
+            ]
+        ].copy()
+        recent_view["merchant"] = recent_view["merchant"].fillna("")
+        st.dataframe(
+            recent_view,
             use_container_width=True,
+            hide_index=True,
+            column_config={
+                "txn_at": st.column_config.DatetimeColumn(
+                    "Date", format="YYYY-MM-DD HH:mm"
+                ),
+                "signed_amount": st.column_config.NumberColumn(
+                    "Amount", format="%,.2f ₮"
+                ),
+                "category_source": st.column_config.TextColumn("Classification"),
+                "txn_type": st.column_config.TextColumn("Type"),
+            },
         )
 
-st.subheader("Largest expenses")
-if largest_expenses.empty:
-    st.info("No categorized expenses in this range.")
-else:
-    st.dataframe(
-        largest_expenses,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "txn_at": st.column_config.DatetimeColumn(
-                "Date", format="YYYY-MM-DD HH:mm"
-            ),
-            "amount": st.column_config.NumberColumn("Amount", format="%,.2f ₮"),
-        },
-    )
+with st.expander("Internal transfers (excluded from cash flow)"):
+    transfer_columns = st.columns(2)
+    transfer_columns[0].metric("Transfers in", _money(transfer_in))
+    transfer_columns[1].metric("Transfers out", _money(transfer_out))

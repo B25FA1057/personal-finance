@@ -29,29 +29,45 @@ DEFAULT_RULES = [
 ]
 
 
-def seed(session: Session) -> None:
-    categories_by_name = {
-        category.name: category
+def seed_default_categories(session: Session) -> tuple[int, int]:
+    existing_names = {
+        category.name.strip().casefold()
         for category in session.execute(select(Category)).scalars().all()
     }
+    added = 0
+    skipped = 0
     for name, kind, sort_order in DEFAULT_CATEGORIES:
-        if name not in categories_by_name:
-            category = Category(
+        normalized_name = name.strip().casefold()
+        if normalized_name in existing_names:
+            skipped += 1
+            continue
+        session.add(
+            Category(
                 name=name,
                 kind=kind,
                 sort_order=sort_order,
                 is_default=True,
             )
-            session.add(category)
-            categories_by_name[name] = category
+        )
+        existing_names.add(normalized_name)
+        added += 1
     session.flush()
+    return added, skipped
+
+
+def seed(session: Session) -> None:
+    seed_default_categories(session)
+    categories_by_name = {
+        category.name.strip().casefold(): category
+        for category in session.execute(select(Category)).scalars().all()
+    }
 
     if session.execute(
         select(Bank.id).where(Bank.code == "GOLOMT")
     ).scalar_one_or_none() is None:
         session.add(Bank(code="GOLOMT", name="Golomt Bank"))
 
-    bank_fees = categories_by_name["Bank fees"]
+    bank_fees = categories_by_name["bank fees"]
     legacy_rules = session.execute(
         select(Rule).where(
             Rule.priority == 100,

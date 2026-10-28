@@ -1,0 +1,1090 @@
+# REVIEW COPY of the P0-fix diff. Two old hardcoded account numbers are masked on removed (-) lines,
+# so this file is for reading, not for `git apply`. The real changes are in the working tree (uncommitted).
+#
+diff --git a/.env.example b/.env.example
+index b0e9cc2..59bdcf8 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,3 +1,5 @@
+ DATABASE_URL=postgresql+psycopg://postgres:yourpassword@localhost:5432/finance
+ TEST_DATABASE_URL=postgresql+psycopg://postgres:yourpassword@localhost:5432/finance_test
+ PG_DUMP_PATH=C:\Program Files\PostgreSQL\16\bin\pg_dump.exe
++# Comma-separated counterparty account numbers whose QPay payments are bank fees (optional)
++QPAY_FEE_ACCOUNTS=
+diff --git a/README.md b/README.md
+index 3d45125..d909d1b 100644
+--- a/README.md
++++ b/README.md
+@@ -12,9 +12,15 @@ A local personal finance app for importing bank statements, classifying transact
+ 4. Create the databases in PostgreSQL:
+    `CREATE DATABASE finance;`
+    `CREATE DATABASE finance_test;`
+-5. Initialize the schema:
++5. Create the tables and load the default bank, categories and rules:
+    `python -m core.seed`
+-6. Start the app:
++   It is safe to run again: it only adds records that are missing and never changes or
++   removes categories or rules you created or edited. It prints a warning if an existing rule
++   matches any description containing "FEE" (this also matches words like COFFEE).
++6. Optional: if QPay payments to a specific counterparty account are bank fees, list that
++   account number(s) in `.env` as `QPAY_FEE_ACCOUNTS=` (comma-separated). Left empty, QPay
++   payments are treated as ordinary biller payments.
++7. Start the app:
+    `start.bat`
+ 
+ ## Daily use
+@@ -26,7 +32,7 @@ A local personal finance app for importing bank statements, classifying transact
+ 
+ Golomt Bank's `OperativeAccountStatementRaw` workbook format is currently supported. Unsupported workbook layouts are rejected, and statement or row balance discrepancies are shown as import warnings. Re-uploading the same file is recognized; matching transactions in a different statement are skipped as duplicates.
+ 
+-Use the transaction filters to narrow by date, account, category, or transaction type, then export the filtered list as a CSV for spreadsheets. The Dashboard summarizes categorized income, expenses, savings, fees, and uncategorized spending; transfers remain separate from income and expenses.
++Use the transaction filters to narrow by date, account, category, or transaction type, then export the filtered list as a CSV for spreadsheets. The Dashboard shows categorized income, uncategorized inflows, expenses, savings, uncategorized outflows, and net cash flow (all inflows minus all outflows, so uncategorized money is never silently left out). Internal transfers are shown separately and excluded from every cash-flow figure; bank fees are included in the totals above rather than added on top.
+ 
+ The Transactions page supports description search, merchant/payee filtering, date/category/type filters, and editing descriptions, categories, and transaction types. Results are paginated. Saving a manual category marks it as manual so rule re-application and duplicate statement imports do not overwrite it. The Dashboard uses database-side monthly and category aggregations; own-account transfers are excluded from cash-flow totals.
+ 
+diff --git a/core/config.py b/core/config.py
+index 719ebc4..1679dd0 100644
+--- a/core/config.py
++++ b/core/config.py
+@@ -12,7 +12,15 @@ DATABASE_URL: str = os.getenv("DATABASE_URL") or ""
+ TEST_DATABASE_URL: str | None = os.getenv("TEST_DATABASE_URL")
+ PG_DUMP_PATH: str | None = os.getenv("PG_DUMP_PATH")
+ 
+-QPAY_FEE_ACCOUNTS: frozenset[str] = frozenset({"<REDACTED-QPAY-ACCOUNT>"})
++
++def _env_set(name: str) -> frozenset[str]:
++    """Parse a comma-separated environment variable into a set of non-empty strings."""
++    return frozenset(item.strip() for item in os.getenv(name, "").split(",") if item.strip())
++
++
++# Counterparty account numbers whose QPay payments are bank fees (comma-separated in .env).
++# Empty by default: QPay fee detection stays off until you set QPAY_FEE_ACCOUNTS.
++QPAY_FEE_ACCOUNTS: frozenset[str] = _env_set("QPAY_FEE_ACCOUNTS")
+ FEE_LINK_WINDOW_SECONDS = 15
+ CARD_REF_TOLERANCE_SECONDS = 5
+ 
+diff --git a/core/queries.py b/core/queries.py
+index eb801a6..ba6d067 100644
+--- a/core/queries.py
++++ b/core/queries.py
+@@ -348,7 +348,7 @@ def transaction_count(
+     return int(session.scalar(statement) or 0)
+ 
+ 
+-def _dashboard_date_filters(
++def _date_conditions(
+     date_from: date | datetime | None, date_to: date | datetime | None
+ ) -> list:
+     conditions = []
+@@ -361,6 +361,13 @@ def _dashboard_date_filters(
+             conditions.append(Transaction.txn_at <= upper_bound)
+         else:
+             conditions.append(Transaction.txn_at < upper_bound)
++    return conditions
++
++
++def _dashboard_date_filters(
++    date_from: date | datetime | None, date_to: date | datetime | None
++) -> list:
++    conditions = _date_conditions(date_from, date_to)
+     conditions.extend(
+         [
+             Transaction.txn_type != "own_transfer",
+@@ -370,11 +377,141 @@ def _dashboard_date_filters(
+     return conditions
+ 
+ 
++def _flow_bucket_columns() -> dict:
++    """SQL sums that split every transaction into exactly one cash-flow bucket.
++
++    The query must outer-join Category so uncategorized rows are kept. Internal transfers
++    (txn_type "own_transfer" or a category of kind "transfer") are separated first; the
++    rest is split by direction and category kind:
++
++    inflows:  income | uncategorized_in | other_in (categorized, but not as income, e.g. a refund)
++    outflows: expenses | savings | uncategorized_out | other_out (e.g. a reversal filed as income)
++
++    Every row falls in one bucket, so nothing is dropped or counted twice. Category.kind is
++    wrapped in coalesce so a NULL kind (uncategorized) never turns a condition into NULL.
++    """
++    kind = func.coalesce(Category.kind, "")
++    is_in = Transaction.direction == "in"
++    is_out = Transaction.direction == "out"
++    transfer = (Transaction.txn_type == "own_transfer") | (kind == "transfer")
++    external = ~transfer
++    uncategorized = Transaction.category_id.is_(None)
++
++    def total(condition):
++        return func.coalesce(func.sum(case((condition, Transaction.amount), else_=0)), 0)
++
++    return {
++        "income": total(is_in & external & (kind == "income")),
++        "uncategorized_in": total(is_in & external & uncategorized),
++        "other_in": total(is_in & external & ~uncategorized & (kind != "income")),
++        "expenses": total(is_out & external & (kind == "expense")),
++        "savings": total(is_out & external & (kind == "savings")),
++        "uncategorized_out": total(is_out & external & uncategorized),
++        "other_out": total(
++            is_out & external & ~uncategorized & ~kind.in_(["expense", "savings"])
++        ),
++        "transfers_in": total(is_in & transfer),
++        "transfers_out": total(is_out & transfer),
++    }
++
++
++def cashflow_summary(
++    session: Session,
++    date_from: date | datetime | None = None,
++    date_to: date | datetime | None = None,
++) -> dict[str, Decimal]:
++    """Period totals for the dashboard KPIs.
++
++    Buckets (see ``_flow_bucket_columns``) are mutually exclusive. Derived values:
++    ``total_inflows``/``total_outflows`` cover all non-transfer money movement and
++    ``net_cash_flow`` is their difference. Savings count as an outflow of cash.
++    ``fees`` (txn_type "fee") is informational: those rows are already inside the buckets
++    above (normally ``expenses``), so it must not be added to them. Internal transfers are
++    reported separately and are excluded from every cash-flow total.
++    """
++    buckets = _flow_bucket_columns()
++    fees = func.coalesce(
++        func.sum(case((Transaction.txn_type == "fee", Transaction.amount), else_=0)), 0
++    )
++    statement = (
++        select(*[column.label(name) for name, column in buckets.items()], fees.label("fees"))
++        .select_from(Transaction)
++        .outerjoin(Category, Category.id == Transaction.category_id)
++        .where(*_date_conditions(date_from, date_to))
++    )
++    row = session.execute(statement).one()
++    summary = {name: Decimal(str(getattr(row, name))) for name in [*buckets, "fees"]}
++    summary["total_inflows"] = (
++        summary["income"] + summary["uncategorized_in"] + summary["other_in"]
++    )
++    summary["total_outflows"] = (
++        summary["expenses"]
++        + summary["savings"]
++        + summary["uncategorized_out"]
++        + summary["other_out"]
++    )
++    summary["net_cash_flow"] = summary["total_inflows"] - summary["total_outflows"]
++    return summary
++
++
++def _monthly_cashflow_full_df(
++    session: Session,
++    date_from: date | datetime | None,
++    date_to: date | datetime | None,
++) -> pd.DataFrame:
++    year = extract("year", Transaction.txn_at).label("year")
++    month = extract("month", Transaction.txn_at).label("month")
++    buckets = _flow_bucket_columns()
++    names = [
++        "income",
++        "uncategorized_in",
++        "other_in",
++        "expenses",
++        "savings",
++        "uncategorized_out",
++        "other_out",
++    ]
++    statement = (
++        select(year, month, *[buckets[name].label(name) for name in names])
++        .select_from(Transaction)
++        .outerjoin(Category, Category.id == Transaction.category_id)
++        .where(*_dashboard_date_filters(date_from, date_to))
++        .group_by(year, month)
++        .order_by(year, month)
++    )
++    records = []
++    for row in session.execute(statement).all():
++        values = {name: Decimal(str(getattr(row, name))) for name in names}
++        net = (
++            values["income"]
++            + values["uncategorized_in"]
++            + values["other_in"]
++            - values["expenses"]
++            - values["savings"]
++            - values["uncategorized_out"]
++            - values["other_out"]
++        )
++        records.append(
++            {"month": f"{int(row.year):04d}-{int(row.month):02d}", **values, "net_cash_flow": net}
++        )
++    return pd.DataFrame(records, columns=["month", *names, "net_cash_flow"])
++
++
+ def monthly_cashflow_df(
+     session: Session,
+     date_from: date | datetime | None = None,
+     date_to: date | datetime | None = None,
++    include_uncategorized: bool = False,
+ ) -> pd.DataFrame:
++    """Monthly income/expense/savings.
++
++    By default only categorized rows are counted (columns: month, income, expenses, savings,
++    net_cash_flow). With ``include_uncategorized=True`` the uncategorized and
++    mismatched-direction buckets are added as columns and ``net_cash_flow`` covers all
++    non-transfer movement, matching ``cashflow_summary``.
++    """
++    if include_uncategorized:
++        return _monthly_cashflow_full_df(session, date_from, date_to)
+     year = extract("year", Transaction.txn_at).label("year")
+     month = extract("month", Transaction.txn_at).label("month")
+     income = func.coalesce(
+diff --git a/core/seed.py b/core/seed.py
+index 193a2c9..fc7ce09 100644
+--- a/core/seed.py
++++ b/core/seed.py
+@@ -1,13 +1,21 @@
++"""Default reference data (bank, categories, starter rules).
++
++Run with ``python -m core.seed``. Seeding is additive and idempotent: it only inserts
++records that are missing and never updates, renames or deletes anything that already
++exists, so user-created or user-edited categories and rules are left alone.
++"""
++
+ from __future__ import annotations
+ 
+-from decimal import Decimal
++from dataclasses import dataclass, field
+ 
+-from sqlalchemy import select
++from sqlalchemy import func, select
+ from sqlalchemy.orm import Session
+ 
+-from .models import Bank, Category, Counterparty, OwnAccount, Rule
+-
++from .db import get_session, init_db
++from .models import Bank, Category, Rule
+ 
++# (name, kind, sort_order)
+ DEFAULT_CATEGORIES = [
+     ("Income", "income", 10),
+     ("Salary", "income", 20),
+@@ -20,29 +28,107 @@ DEFAULT_CATEGORIES = [
+     ("Transfers", "transfer", 20),
+     ("Other income", "income", 30),
+     ("Cash withdrawals", "expense", 60),
++    ("Savings", "savings", 10),
++]
++
++# (priority, field, match_type, pattern, category name)
++#
++# Fees and own-account transfers are matched on the ``txn_type`` that core/enrich.py
++# assigns (EASYINFO fees, PORD charges and configured QPay fee accounts -> "fee";
++# own-account movements -> "own_transfer"). Matching on that structured field avoids
++# free-text rules such as ``description contains "FEE"``, which also hit "COFFEE".
++DEFAULT_RULES = [
++    (10, "txn_type", "equals", "fee", "Bank fees"),
++    (10, "txn_type", "equals", "own_transfer", "Own account transfer"),
+ ]
+ 
++LEGACY_BROAD_FEE_PATTERN = "FEE"
+ 
+-def seed(session: Session) -> None:
+-    existing = session.execute(select(Category.name)).scalars().all()
+-    if not existing:
+-        for name, kind, sort_order in DEFAULT_CATEGORIES:
+-            session.add(Category(name=name, kind=kind, sort_order=sort_order, is_default=True))
+ 
+-    if not session.execute(select(Bank.id).where(Bank.code == "GOLOMT")).scalar_one_or_none():
++@dataclass
++class SeedResult:
++    banks_added: int = 0
++    categories_added: int = 0
++    rules_added: int = 0
++    warnings: list[str] = field(default_factory=list)
++
++    @property
++    def total_added(self) -> int:
++        return self.banks_added + self.categories_added + self.rules_added
++
++
++def seed(session: Session) -> SeedResult:
++    result = SeedResult()
++
++    if session.execute(select(Bank.id).where(Bank.code == "GOLOMT")).scalar_one_or_none() is None:
+         session.add(Bank(code="GOLOMT", name="Golomt Bank"))
++        result.banks_added += 1
+ 
+-    if not session.execute(select(OwnAccount.id).where(OwnAccount.account_no == "<REDACTED-SEED-ACCOUNT>")).scalar_one_or_none():
+-        session.add(OwnAccount(account_no="<REDACTED-SEED-ACCOUNT>", label="Main account"))
++    existing_names = set(session.execute(select(Category.name)).scalars().all())
++    for name, kind, sort_order in DEFAULT_CATEGORIES:
++        if name not in existing_names:
++            session.add(Category(name=name, kind=kind, sort_order=sort_order, is_default=True))
++            result.categories_added += 1
++    session.flush()
+ 
+-    if not session.execute(select(Counterparty.id).where(Counterparty.key == "M:SEZIS BUF")).scalar_one_or_none():
+-        session.add(Counterparty(key="M:SEZIS BUF", kind="merchant", display_name="SEZIS BUF"))
++    category_ids = dict(session.execute(select(Category.name, Category.id)).all())
++    for priority, rule_field, match_type, pattern, category_name in DEFAULT_RULES:
++        category_id = category_ids.get(category_name)
++        if category_id is None:
++            result.warnings.append(f"Rule {rule_field} {match_type} '{pattern}' skipped: category '{category_name}' not found.")
++            continue
++        # Match on (field, match_type, pattern) regardless of category or priority, so a rule
++        # the user already created or retargeted is never duplicated or overwritten.
++        already_present = session.execute(
++            select(Rule.id)
++            .where(Rule.field == rule_field, Rule.match_type == match_type, Rule.pattern == pattern)
++            .limit(1)
++        ).scalar_one_or_none()
++        if already_present is None:
++            session.add(
++                Rule(
++                    priority=priority,
++                    field=rule_field,
++                    match_type=match_type,
++                    pattern=pattern,
++                    category_id=category_id,
++                    active=True,
++                )
++            )
++            result.rules_added += 1
+ 
+-    for category in session.execute(select(Category)).scalars().all():
+-        if category.name == "Bank fees" and category.id:
+-            fee_rule = session.execute(select(Rule.id).where(Rule.pattern == "FEE")).scalar_one_or_none()
+-            if not fee_rule:
+-                session.add(Rule(priority=100, field="description", match_type="contains", pattern="FEE", category_id=category.id, active=True))
+-                break
++    legacy = session.execute(
++        select(Rule.id)
++        .where(
++            Rule.field == "description",
++            Rule.match_type == "contains",
++            func.upper(func.trim(Rule.pattern)) == LEGACY_BROAD_FEE_PATTERN,
++            Rule.active.is_(True),
++        )
++        .limit(1)
++    ).scalar_one_or_none()
++    if legacy is not None:
++        result.warnings.append(
++            "An active rule matches any description containing 'FEE' (this also matches words "
++            "like COFFEE). It was left unchanged; review or disable it in Settings."
++        )
+ 
+     session.commit()
++    return result
++
++
++def main() -> int:
++    init_db()
++    with get_session() as session:
++        result = seed(session)
++    print(
++        f"Seed complete: {result.banks_added} bank(s), {result.categories_added} categor(ies), "
++        f"{result.rules_added} rule(s) added."
++    )
++    for warning in result.warnings:
++        print(f"WARNING: {warning}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/finance-tool-prompts.md b/finance-tool-prompts.md
+index 17d0d63..7a7da88 100644
+--- a/finance-tool-prompts.md
++++ b/finance-tool-prompts.md
+@@ -60,7 +60,7 @@ Files to create:
+ 5. core/config.py:
+    - load .env with python-dotenv (from project root, path-independent of cwd).
+    - DATABASE_URL: str, TEST_DATABASE_URL: str | None, PG_DUMP_PATH: str | None.
+-   - QPAY_FEE_ACCOUNTS: frozenset[str] = frozenset({"<REDACTED-QPAY-ACCOUNT>"})
++   - QPAY_FEE_ACCOUNTS: frozenset[str] = frozenset({"9900000001"})
+    - FEE_LINK_WINDOW_SECONDS = 15 ; CARD_REF_TOLERANCE_SECONDS = 5
+    - Raise a clear RuntimeError if DATABASE_URL missing.
+ 6. start.bat — cd to its own folder, activate .venv\Scripts\activate.bat, run: streamlit run app.py
+@@ -164,7 +164,7 @@ Rows 3+ (columns: date | balance_before | out | in | balance_after | description
+ 2026-09-29T13:27:25 | 131630.00 |  | 52500 | 184130.00 | ШИЛЖҮҮЛЭГЧ ЦЭЦЭГ-ЦЭЦЭГ БОЛД | 5006000001
+ 2026-10-01T17:12:04 | 184130.00 | 72981.95 |  | 111148.05 | 400000******1111:29-09-2026 13:28:49:MCI:APPLE COM |
+ 2026-10-04T13:08:04 | 111108.05 | 3960 |  | 107148.05 | qpay 101782630891166, ccp-2494a138- 40a0 | MN680005005021900000
+-2026-10-04T13:08:04 | 111148.05 | 40 |  | 111108.05 | QPAY 335818730921540 ТЕСТ ХХК 4000 TRX | <REDACTED-QPAY-ACCOUNT>
++2026-10-04T13:08:04 | 111148.05 | 40 |  | 111108.05 | QPAY 335818730921540 ТЕСТ ХХК 4000 TRX | 9900000001
+ 2026-10-08T21:01:02 | 107148.05 |  | 110000 | 217148.05 | O-БААТАР САРУУЛ | 5032300001
+ 2026-10-09T10:02:06 | 217148.05 | 106500 |  | 110648.05 | 400000******1111:08-10-2026 21:01:13:BOM:KFC ZURAG |
+ 2026-10-09T12:57:13 | 110648.05 | 25350 |  | 85298.05 | 400000******1111:07-10-2026 14:12:55:POS:CU-281 KH |
+diff --git a/pages/4_Dashboard.py b/pages/4_Dashboard.py
+index e831949..bb73514 100644
+--- a/pages/4_Dashboard.py
++++ b/pages/4_Dashboard.py
+@@ -6,11 +6,10 @@ from decimal import Decimal
+ import pandas as pd
+ import plotly.express as px
+ import streamlit as st
+-from sqlalchemy import func, or_, select
+ 
+ from core.db import get_session
+-from core.models import Category, Transaction
+ from core.queries import (
++    cashflow_summary,
+     expense_categories_df,
+     expense_trend_df,
+     monthly_cashflow_df,
+@@ -50,65 +49,67 @@ if date_from > date_to:
+     st.stop()
+ 
+ with get_session() as session:
+-    monthly = monthly_cashflow_df(session, date_from, date_to)
++    summary = cashflow_summary(session, date_from, date_to)
++    monthly = monthly_cashflow_df(session, date_from, date_to, include_uncategorized=True)
+     category_spending = expense_categories_df(session, date_from, date_to)
+     top_merchants = top_merchant_expenses_df(session, date_from, date_to)
+     largest_expenses = top_expenses_df(session, date_from, date_to)
+-    end_exclusive = date.fromordinal(date_to.toordinal() + 1)
+-    fees_total = session.scalar(
+-        select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+-            Transaction.txn_at >= date_from,
+-            Transaction.txn_at < end_exclusive,
+-            Transaction.txn_type == "fee",
+-        )
+-    ) or Decimal("0.00")
+-    uncategorized_out = session.scalar(
+-        select(func.coalesce(func.sum(Transaction.amount), 0))
+-        .select_from(Transaction)
+-        .outerjoin(Category, Category.id == Transaction.category_id)
+-        .where(
+-            Transaction.txn_at >= date_from,
+-            Transaction.txn_at < date.fromordinal(date_to.toordinal() + 1),
+-            Transaction.direction == "out",
+-            Transaction.category_id.is_(None),
+-            Transaction.txn_type != "own_transfer",
+-            or_(Category.kind != "transfer", Category.kind.is_(None)),
+-        )
+-    ) or Decimal("0.00")
+ 
+-if monthly.empty:
+-    st.info("No categorized income or expenses in this date range.")
+-    income_total = expense_total = savings_total = net_total = Decimal("0.00")
+-else:
+-    income_total = sum(monthly["income"], Decimal("0.00"))
+-    expense_total = sum(monthly["expenses"], Decimal("0.00"))
+-    savings_total = sum(monthly["savings"], Decimal("0.00"))
+-    net_total = sum(monthly["net_cash_flow"], Decimal("0.00"))
+-
+-kpis = st.columns(6)
+-kpis[0].metric("Income", _money(income_total))
+-kpis[1].metric("Expenses", _money(expense_total))
+-kpis[2].metric("Savings", _money(savings_total))
+-kpis[3].metric("Net cash flow", _money(net_total))
+-kpis[4].metric("Bank fees", _money(Decimal(str(fees_total))))
+-kpis[5].metric("Uncategorized out", _money(Decimal(str(uncategorized_out))))
++st.subheader("Cash flow")
++inflow_cols = st.columns(4)
++inflow_cols[0].metric("Categorized income", _money(summary["income"]))
++inflow_cols[1].metric("Uncategorized inflows", _money(summary["uncategorized_in"]))
++inflow_cols[2].metric("Expenses", _money(summary["expenses"]))
++inflow_cols[3].metric("Savings", _money(summary["savings"]))
++outflow_cols = st.columns(4)
++outflow_cols[0].metric("Uncategorized outflows", _money(summary["uncategorized_out"]))
++outflow_cols[1].metric("Net cash flow", _money(summary["net_cash_flow"]))
++outflow_cols[2].metric("Internal transfers in", _money(summary["transfers_in"]))
++outflow_cols[3].metric("Internal transfers out", _money(summary["transfers_out"]))
++st.caption(
++    "Net cash flow = all inflows (categorized income + uncategorized + other) minus all "
++    "outflows (expenses + savings + uncategorized + other). Internal transfers are shown "
++    "separately and are not part of any cash-flow figure. "
++    f"Bank fees of {_money(summary['fees'])} are already included in the figures above."
++)
++if summary["uncategorized_in"] or summary["uncategorized_out"]:
++    st.warning(
++        f"{_money(summary['uncategorized_in'])} in and {_money(summary['uncategorized_out'])} out "
++        "are uncategorized. They count toward Net cash flow; categorize them on the Review "
++        "or Transactions page to see them as income or expenses."
++    )
++if summary["other_in"] or summary["other_out"]:
++    st.info(
++        f"Also included in Net cash flow: {_money(summary['other_in'])} of inflows filed under "
++        f"expense or savings categories (e.g. refunds, savings withdrawals) and "
++        f"{_money(summary['other_out'])} of outflows filed under income categories."
++    )
+ 
+ st.subheader("Monthly cash flow")
+ if monthly.empty:
+-    st.info("Classify transactions as income or expense to see monthly cash flow.")
++    st.info("No transactions in this date range.")
+ else:
+     monthly_chart = monthly.melt(
+         id_vars="month",
+-        value_vars=["income", "expenses", "savings", "net_cash_flow"],
++        value_vars=[
++            "income",
++            "uncategorized_in",
++            "expenses",
++            "savings",
++            "uncategorized_out",
++            "net_cash_flow",
++        ],
+         var_name="measure",
+         value_name="amount",
+     )
+     monthly_chart["amount"] = monthly_chart["amount"].astype(float)
+     monthly_chart["measure"] = monthly_chart["measure"].map(
+         {
+-            "income": "Income",
++            "income": "Categorized income",
++            "uncategorized_in": "Uncategorized inflows",
+             "expenses": "Expenses",
+             "savings": "Savings",
++            "uncategorized_out": "Uncategorized outflows",
+             "net_cash_flow": "Net cash flow",
+         }
+     )
+diff --git a/tests/test_core_reliability.py b/tests/test_core_reliability.py
+index 1da73db..9773f19 100644
+--- a/tests/test_core_reliability.py
++++ b/tests/test_core_reliability.py
+@@ -130,7 +130,7 @@ def _full_sample_bytes() -> bytes:
+         ["2026-09-29T13:27:25", 131630.00, "", 52500, 184130.00, "ШИЛЖҮҮЛЭГЧ ЦЭЦЭГ-ЦЭЦЭГ БОЛД", "5006000001"],
+         ["2026-10-01T17:12:04", 184130.00, 72981.95, "", 111148.05, "400000******1111:29-09-2026 13:28:49:MCI:APPLE COM", ""],
+         ["2026-10-04T13:08:04", 111108.05, 3960, "", 107148.05, "qpay 101782630891166, ccp-2494a138- 40a0", "MN680005005021900000"],
+-        ["2026-10-04T13:08:04", 111148.05, 40, "", 111108.05, "QPAY 335818730921540 ТЕСТ ХХК 4000 TRX", "<REDACTED-QPAY-ACCOUNT>"],
++        ["2026-10-04T13:08:04", 111148.05, 40, "", 111108.05, "QPAY 335818730921540 ТЕСТ ХХК 4000 TRX", "9900000001"],
+         ["2026-10-08T21:01:02", 107148.05, "", 110000, 217148.05, "O-БААТАР САРУУЛ", "5032300001"],
+         ["2026-10-09T10:02:06", 217148.05, 106500, "", 110648.05, "400000******1111:08-10-2026 21:01:13:BOM:KFC ZURAG", ""],
+         ["2026-10-09T12:57:13", 110648.05, 25350, "", 85298.05, "400000******1111:07-10-2026 14:12:55:POS:CU-281 KH", ""],
+@@ -187,7 +187,8 @@ def test_parser_reports_balance_mismatch() -> None:
+     assert any("Statement balance does not reconcile" in warning for warning in statement.warnings)
+ 
+ 
+-def test_full_sample_enrichment_and_fee_linking() -> None:
++def test_full_sample_enrichment_and_fee_linking(monkeypatch: pytest.MonkeyPatch) -> None:
++    monkeypatch.setattr("core.enrich.QPAY_FEE_ACCOUNTS", frozenset({"9900000001"}))
+     workbook = load_workbook(BytesIO(_full_sample_bytes()), data_only=True)
+     statement = GolomtParser().parse(workbook)
+     items = [enrich(txn, {"<REDACTED-SEED-ACCOUNT>"}) for txn in statement.transactions]
+diff --git a/tests/test_seed_and_fee_rules.py b/tests/test_seed_and_fee_rules.py
+new file mode 100644
+index 0000000..bd00c01
+--- /dev/null
++++ b/tests/test_seed_and_fee_rules.py
+@@ -0,0 +1,282 @@
++from __future__ import annotations
++
++from collections.abc import Iterator
++from datetime import datetime
++from decimal import Decimal
++
++import pytest
++from sqlalchemy import create_engine, func, select
++from sqlalchemy.orm import Session, sessionmaker
++
++from core.classify import classify_one, classify_transactions, reapply_all
++from core.enrich import enrich
++from core.models import (
++    Account,
++    Bank,
++    Base,
++    Category,
++    Counterparty,
++    ImportBatch,
++    OwnAccount,
++    Rule,
++    Transaction,
++)
++from core.parsers.base import RawTxn
++from core.seed import DEFAULT_CATEGORIES, DEFAULT_RULES, seed
++
++SYNTHETIC_QPAY_FEE_ACCOUNT = "9900000001"
++POSTED = datetime(2026, 1, 2, 10, 0, 0)
++
++
++@pytest.fixture
++def db_session() -> Iterator[Session]:
++    engine = create_engine("sqlite://")
++    Base.metadata.create_all(engine)
++    session = sessionmaker(bind=engine, expire_on_commit=False)()
++    try:
++        yield session
++    finally:
++        session.close()
++        Base.metadata.drop_all(engine)
++        engine.dispose()
++
++
++def _count(session: Session, model: type) -> int:
++    return session.execute(select(func.count()).select_from(model)).scalar_one()
++
++
++# --------------------------------------------------------------------------- seeding
++
++
++def test_seed_fresh_database_creates_defaults(db_session: Session) -> None:
++    result = seed(db_session)
++
++    assert result.banks_added == 1
++    assert result.categories_added == len(DEFAULT_CATEGORIES)
++    assert result.rules_added == len(DEFAULT_RULES)
++    assert result.warnings == []
++
++    assert db_session.execute(select(Bank.name).where(Bank.code == "GOLOMT")).scalar_one() == "Golomt Bank"
++    kinds = dict(db_session.execute(select(Category.name, Category.kind)).all())
++    assert kinds["Savings"] == "savings"
++    assert kinds["Bank fees"] == "expense"
++    assert kinds["Own account transfer"] == "transfer"
++    assert all(c.is_default for c in db_session.execute(select(Category)).scalars())
++
++    rules = db_session.execute(select(Rule)).scalars().all()
++    assert {(r.field, r.match_type, r.pattern) for r in rules} == {
++        ("txn_type", "equals", "fee"),
++        ("txn_type", "equals", "own_transfer"),
++    }
++    assert all(r.active for r in rules)
++
++
++def test_seed_creates_no_personal_records(db_session: Session) -> None:
++    seed(db_session)
++
++    assert _count(db_session, OwnAccount) == 0
++    assert _count(db_session, Counterparty) == 0
++
++
++def test_seed_is_idempotent(db_session: Session) -> None:
++    seed(db_session)
++    before = (_count(db_session, Bank), _count(db_session, Category), _count(db_session, Rule))
++
++    for _ in range(3):
++        again = seed(db_session)
++        assert again.total_added == 0
++
++    after = (_count(db_session, Bank), _count(db_session, Category), _count(db_session, Rule))
++    assert after == before
++
++
++def test_seed_does_not_overwrite_user_categories_or_rules(db_session: Session) -> None:
++    custom_category = Category(name="My Fees", kind="expense", sort_order=1, is_default=False)
++    edited_default = Category(name="Bank fees", kind="expense", sort_order=999, is_default=False)
++    db_session.add_all([custom_category, edited_default])
++    db_session.flush()
++    # The user already owns a rule for txn_type == fee, retargeted to their own category.
++    user_rule = Rule(
++        priority=5, field="txn_type", match_type="equals", pattern="fee",
++        category_id=custom_category.id, active=False,
++    )
++    other_rule = Rule(
++        priority=77, field="merchant", match_type="contains", pattern="MYSHOP",
++        category_id=custom_category.id, active=True,
++    )
++    db_session.add_all([user_rule, other_rule])
++    db_session.commit()
++
++    result = seed(db_session)
++
++    assert result.categories_added == len(DEFAULT_CATEGORIES) - 1  # only "Bank fees" existed
++    assert db_session.execute(select(func.count()).where(Category.name == "Bank fees")).scalar_one() == 1
++    db_session.refresh(edited_default)
++    assert (edited_default.sort_order, edited_default.is_default) == (999, False)
++    db_session.refresh(user_rule)
++    assert (user_rule.priority, user_rule.category_id, user_rule.active) == (5, custom_category.id, False)
++    assert db_session.execute(
++        select(func.count()).where(Rule.field == "txn_type", Rule.pattern == "fee")
++    ).scalar_one() == 1  # not duplicated
++    db_session.refresh(other_rule)
++    assert (other_rule.priority, other_rule.pattern) == (77, "MYSHOP")
++    assert db_session.get(Category, custom_category.id).name == "My Fees"
++
++
++def test_seed_on_database_seeded_by_old_version_only_adds_missing_savings(db_session: Session) -> None:
++    for name, kind, order in DEFAULT_CATEGORIES:
++        if name != "Savings":
++            db_session.add(Category(name=name, kind=kind, sort_order=order, is_default=True))
++    db_session.commit()
++
++    result = seed(db_session)
++
++    assert result.categories_added == 1
++    assert db_session.execute(select(Category.kind).where(Category.name == "Savings")).scalar_one() == "savings"
++
++
++def test_seed_warns_about_legacy_broad_fee_rule_without_changing_it(db_session: Session) -> None:
++    seed(db_session)
++    bank_fees = db_session.execute(select(Category).where(Category.name == "Bank fees")).scalar_one()
++    legacy = Rule(
++        priority=100, field="description", match_type="contains", pattern="FEE",
++        category_id=bank_fees.id, active=True,
++    )
++    db_session.add(legacy)
++    db_session.commit()
++
++    result = seed(db_session)
++
++    assert any("'FEE'" in w for w in result.warnings)
++    db_session.refresh(legacy)
++    assert (legacy.field, legacy.match_type, legacy.pattern, legacy.active) == (
++        "description", "contains", "FEE", True,
++    )
++
++    legacy.active = False
++    db_session.commit()
++    assert seed(db_session).warnings == []
++
++
++# ------------------------------------------------------------------ fee rule regression
++
++
++def _classify_description(
++    session: Session,
++    description: str,
++    *,
++    direction: str = "out",
++    counterparty_account: str | None = None,
++    my_accounts: set[str] | None = None,
++) -> str | None:
++    """Run the real enrich() -> classify_one() pipeline against the seeded rules."""
++    item = enrich(
++        RawTxn(
++            posted_at=POSTED, txn_at=POSTED, amount=Decimal("10.00"), direction=direction,  # type: ignore[arg-type]
++            description=description, counterparty_account=counterparty_account,
++        ),
++        my_accounts or set(),
++    )
++    txn = Transaction(
++        description=description, merchant=item.merchant, txn_type=item.txn_type,
++        counterparty_account=item.counterparty_account, category_source="none",
++    )
++    rules = session.execute(
++        select(Rule).where(Rule.active.is_(True)).order_by(Rule.priority, Rule.id)
++    ).scalars().all()
++    category_id, _source = classify_one(txn, list(rules))
++    return None if category_id is None else session.get(Category, category_id).name
++
++
++@pytest.fixture
++def seeded(db_session: Session, monkeypatch: pytest.MonkeyPatch) -> Session:
++    monkeypatch.setattr("core.enrich.QPAY_FEE_ACCOUNTS", frozenset({SYNTHETIC_QPAY_FEE_ACCOUNT}))
++    seed(db_session)
++    return db_session
++
++
++@pytest.mark.parametrize(
++    ("description", "account"),
++    [
++        ("EASYINFO fee for POS20260102,SMS", None),
++        ("Charges for PORD Customer Payment :123456", None),
++        ("QPAY payment", SYNTHETIC_QPAY_FEE_ACCOUNT),
++    ],
++)
++def test_real_fee_descriptions_are_classified_as_bank_fees(
++    seeded: Session, description: str, account: str | None
++) -> None:
++    assert _classify_description(seeded, description, counterparty_account=account) == "Bank fees"
++
++
++@pytest.mark.parametrize(
++    "description",
++    [
++        "COFFEE SHOP PURCHASE",
++        "Feedback refund",
++        "Fee-free account promotion",
++        "Coffee beans and 3 coffees",
++        "400000******1111:02-01-2026 10:02:00:POS:COFFEE HOUSE",
++        "SOCIALPAY гүйлгээ, Coffee",
++        "Bonfire Festival ticket",
++    ],
++)
++def test_fee_lookalike_descriptions_are_not_bank_fees(seeded: Session, description: str) -> None:
++    assert _classify_description(seeded, description) is None
++
++
++def test_qpay_to_ordinary_biller_is_not_a_bank_fee(seeded: Session) -> None:
++    assert _classify_description(seeded, "QPAY payment", counterparty_account="5551234567") is None
++
++
++def test_own_account_transfer_rule(seeded: Session) -> None:
++    category = _classify_description(
++        seeded, "Transfer", counterparty_account="1234567890", my_accounts={"1234567890"}
++    )
++    assert category == "Own account transfer"
++
++
++def test_manual_category_beats_fee_rule(seeded: Session) -> None:
++    groceries = seeded.execute(select(Category).where(Category.name == "Groceries")).scalar_one()
++
++    manual = Transaction(txn_type="fee", category_id=groceries.id, category_source="manual")
++    rules = list(seeded.execute(select(Rule).order_by(Rule.priority, Rule.id)).scalars())
++    assert classify_one(manual, rules) == (groceries.id, "manual")
++
++
++def test_reapply_all_keeps_manual_fee_category_and_fixes_automatic_one(seeded: Session) -> None:
++    bank = Bank(code="TEST", name="Test Bank")
++    seeded.add(bank)
++    seeded.flush()
++    account = Account(bank_id=bank.id, account_no="1234", currency="MNT")
++    seeded.add(account)
++    seeded.flush()
++    batch = ImportBatch(
++        account_id=account.id, file_name="t.xlsx", file_sha256="a" * 64,
++        total_rows=2, new_rows=2, duplicate_rows=0,
++    )
++    groceries = seeded.execute(select(Category).where(Category.name == "Groceries")).scalar_one()
++    bank_fees = seeded.execute(select(Category).where(Category.name == "Bank fees")).scalar_one()
++    seeded.add(batch)
++    seeded.flush()
++
++    def make(n: int, source: str, category_id: int | None) -> Transaction:
++        return Transaction(
++            account_id=account.id, batch_id=batch.id, posted_at=POSTED, txn_at=POSTED,
++            amount=Decimal("1.00"), direction="out", description="EASYINFO fee for X",
++            txn_type="fee", category_id=category_id, category_source=source,
++            raw={}, dedupe_hash=f"h{n}".ljust(64, "0"),
++        )
++
++    manual = make(1, "manual", groceries.id)
++    automatic = make(2, "none", None)
++    seeded.add_all([manual, automatic])
++    seeded.commit()
++
++    reapply_all(seeded)
++
++    seeded.refresh(manual)
++    seeded.refresh(automatic)
++    assert (manual.category_id, manual.category_source) == (groceries.id, "manual")
++    assert (automatic.category_id, automatic.category_source) == (bank_fees.id, "rule")
++    assert classify_transactions(seeded) == 0  # stable on a second pass
+diff --git a/tests/test_dashboard_cashflow.py b/tests/test_dashboard_cashflow.py
+new file mode 100644
+index 0000000..010909e
+--- /dev/null
++++ b/tests/test_dashboard_cashflow.py
+@@ -0,0 +1,237 @@
++from __future__ import annotations
++
++from collections.abc import Iterator
++from datetime import date, datetime
++from decimal import Decimal
++from itertools import count
++
++import pytest
++from sqlalchemy import create_engine
++from sqlalchemy.orm import Session, sessionmaker
++
++from core.models import Account, Bank, Base, Category, Counterparty, ImportBatch, Transaction
++from core.queries import cashflow_summary, monthly_cashflow_df
++
++D = Decimal
++DAY = date(2026, 10, 20)
++BUCKETS = (
++    "income", "uncategorized_in", "other_in", "expenses", "savings",
++    "uncategorized_out", "other_out", "transfers_in", "transfers_out",
++)
++
++
++@pytest.fixture
++def db_session() -> Iterator[Session]:
++    engine = create_engine("sqlite://")
++    Base.metadata.create_all(engine)
++    session = sessionmaker(bind=engine, expire_on_commit=False)()
++    try:
++        yield session
++    finally:
++        session.close()
++        Base.metadata.drop_all(engine)
++        engine.dispose()
++
++
++class Ledger:
++    """Small helper that adds transactions to one account/batch."""
++
++    def __init__(self, session: Session) -> None:
++        self.session = session
++        bank = Bank(code="TEST", name="Test Bank")
++        session.add(bank)
++        session.flush()
++        account = Account(bank_id=bank.id, account_no="1234", currency="MNT")
++        session.add(account)
++        session.flush()
++        batch = ImportBatch(
++            account_id=account.id, file_name="t.xlsx", file_sha256="a" * 64,
++            total_rows=1, new_rows=1, duplicate_rows=0,
++        )
++        counterparty = Counterparty(key="M:PAYEE", kind="merchant", display_name="Payee")
++        session.add_all([batch, counterparty])
++        session.flush()
++        self.account, self.batch, self.counterparty = account, batch, counterparty
++        self.cat = {
++            "income": Category(name="Salary", kind="income"),
++            "expense": Category(name="Dining", kind="expense"),
++            "savings": Category(name="Savings", kind="savings"),
++            "transfer": Category(name="Own transfer", kind="transfer"),
++        }
++        session.add_all(self.cat.values())
++        session.flush()
++        self._n = count(1)
++
++    def add(
++        self,
++        amount: str,
++        direction: str,
++        category: str | None,
++        *,
++        txn_type: str = "other",
++        when: datetime = datetime(2026, 10, 20, 12, 0, 0),
++    ) -> None:
++        self.session.add(
++            Transaction(
++                account_id=self.account.id, batch_id=self.batch.id, posted_at=when, txn_at=when,
++                amount=D(amount), direction=direction, description="x", txn_type=txn_type,
++                counterparty_id=self.counterparty.id,
++                category_id=self.cat[category].id if category else None,
++                category_source="none", raw={}, dedupe_hash=f"{next(self._n):064d}",
++            )
++        )
++
++
++@pytest.fixture
++def ledger(db_session: Session) -> Ledger:
++    return Ledger(db_session)
++
++
++def _populate(led: Ledger) -> None:
++    led.add("1000.00", "in", "income")                              # income
++    led.add("300.00", "in", None, txn_type="p2p_in")                # uncategorized inflow
++    led.add("40.00", "in", "expense")                               # refund filed as expense
++    led.add("20.00", "in", "savings")                               # savings withdrawal
++    led.add("10000.00", "in", "income", txn_type="own_transfer")    # transfer in (typed)
++    led.add("7.00", "in", None, txn_type="own_transfer")            # transfer in, uncategorized
++    led.add("250.00", "out", "expense")                             # expense
++    led.add("5.00", "out", "expense", txn_type="fee")               # fee (inside expenses)
++    led.add("100.00", "out", "savings")                             # savings deposit
++    led.add("60.00", "out", None)                                   # uncategorized outflow
++    led.add("15.00", "out", "income")                               # reversal filed as income
++    led.add("2000.00", "out", "transfer")                           # transfer out (category kind)
++    led.add("900.00", "out", None, txn_type="own_transfer")         # transfer out, uncategorized
++    # outside the selected day
++    led.add("500.00", "in", None, when=datetime(2026, 9, 30, 23, 59, 59))
++    led.add("77.00", "out", None, when=datetime(2026, 10, 21, 0, 0, 0))
++    led.session.commit()
++
++
++@pytest.fixture
++def populated(ledger: Ledger) -> Ledger:
++    _populate(ledger)
++    return ledger
++
++
++def test_summary_separates_every_bucket(populated: Ledger) -> None:
++    s = cashflow_summary(populated.session, DAY, DAY)
++
++    assert s["income"] == D("1000.00")
++    assert s["uncategorized_in"] == D("300.00")
++    assert s["other_in"] == D("60.00")
++    assert s["expenses"] == D("255.00")
++    assert s["savings"] == D("100.00")
++    assert s["uncategorized_out"] == D("60.00")
++    assert s["other_out"] == D("15.00")
++    assert s["transfers_in"] == D("10007.00")
++    assert s["transfers_out"] == D("2900.00")
++    assert s["fees"] == D("5.00")
++    assert s["total_inflows"] == D("1360.00")
++    assert s["total_outflows"] == D("430.00")
++    assert s["net_cash_flow"] == D("930.00")
++
++
++def test_uncategorized_inflows_are_not_dropped(populated: Ledger) -> None:
++    s = cashflow_summary(populated.session, DAY, DAY)
++    categorized_only = D("1000.00") - D("255.00") - D("100.00")
++
++    assert s["uncategorized_in"] == D("300.00")
++    assert s["net_cash_flow"] != categorized_only
++    assert s["total_inflows"] >= s["income"] + s["uncategorized_in"]
++
++
++def test_buckets_reconcile_to_raw_totals_with_no_double_counting(populated: Ledger) -> None:
++    """Independent check: bucket sums must equal sums taken straight from the rows."""
++    s = cashflow_summary(populated.session, DAY, DAY)
++    rows = [
++        t for t in populated.session.query(Transaction).all()
++        if t.txn_at.date() == DAY
++    ]
++    raw_in = sum((t.amount for t in rows if t.direction == "in"), D("0"))
++    raw_out = sum((t.amount for t in rows if t.direction == "out"), D("0"))
++
++    assert s["total_inflows"] + s["transfers_in"] == raw_in
++    assert s["total_outflows"] + s["transfers_out"] == raw_out
++    # fees are a subset of existing buckets, never an extra one
++    assert s["fees"] <= s["expenses"]
++    assert sum(s[name] for name in BUCKETS) == raw_in + raw_out
++
++
++def test_internal_transfers_never_enter_cash_flow(populated: Ledger) -> None:
++    before = cashflow_summary(populated.session, DAY, DAY)
++    populated.add("123456.00", "in", None, txn_type="own_transfer")
++    populated.add("654321.00", "out", "transfer")
++    populated.session.commit()
++    after = cashflow_summary(populated.session, DAY, DAY)
++
++    for name in ("income", "uncategorized_in", "expenses", "savings", "uncategorized_out",
++                 "total_inflows", "total_outflows", "net_cash_flow"):
++        assert after[name] == before[name]
++    assert after["transfers_in"] == before["transfers_in"] + D("123456.00")
++    assert after["transfers_out"] == before["transfers_out"] + D("654321.00")
++
++
++def test_date_range_is_inclusive_of_end_day_and_excludes_neighbours(populated: Ledger) -> None:
++    wide = cashflow_summary(populated.session, date(2026, 9, 1), date(2026, 10, 31))
++    assert wide["uncategorized_in"] == D("800.00")   # 300 + the 500 from Sep 30
++    assert wide["uncategorized_out"] == D("137.00")  # 60 + the 77 from Oct 21
++
++    day = cashflow_summary(populated.session, DAY, DAY)
++    assert day["uncategorized_in"] == D("300.00")
++    assert day["uncategorized_out"] == D("60.00")
++
++
++def test_empty_database_returns_zeroes(db_session: Session) -> None:
++    s = cashflow_summary(db_session, DAY, DAY)
++
++    assert all(value == D("0") for value in s.values())
++    assert set(BUCKETS) | {"fees", "total_inflows", "total_outflows", "net_cash_flow"} == set(s)
++
++
++def test_monthly_full_view_matches_summary(populated: Ledger) -> None:
++    monthly = monthly_cashflow_df(populated.session, DAY, DAY, include_uncategorized=True)
++
++    assert list(monthly.columns) == [
++        "month", "income", "uncategorized_in", "other_in", "expenses", "savings",
++        "uncategorized_out", "other_out", "net_cash_flow",
++    ]
++    assert monthly.to_dict("records") == [
++        {
++            "month": "2026-10",
++            "income": D("1000.00"), "uncategorized_in": D("300.00"), "other_in": D("60.00"),
++            "expenses": D("255.00"), "savings": D("100.00"),
++            "uncategorized_out": D("60.00"), "other_out": D("15.00"),
++            "net_cash_flow": D("930.00"),
++        }
++    ]
++    assert monthly["net_cash_flow"].sum() == cashflow_summary(populated.session, DAY, DAY)["net_cash_flow"]
++
++
++def test_monthly_full_view_splits_months_and_sums_to_summary(populated: Ledger) -> None:
++    start, end = date(2026, 9, 1), date(2026, 10, 31)
++    monthly = monthly_cashflow_df(populated.session, start, end, include_uncategorized=True)
++
++    assert monthly["month"].tolist() == ["2026-09", "2026-10"]
++    assert monthly.loc[0, "uncategorized_in"] == D("500.00")
++    assert monthly["net_cash_flow"].sum() == cashflow_summary(populated.session, start, end)["net_cash_flow"]
++
++
++def test_default_monthly_view_is_unchanged_and_categorized_only(populated: Ledger) -> None:
++    monthly = monthly_cashflow_df(populated.session, DAY, DAY)
++
++    assert list(monthly.columns) == ["month", "income", "expenses", "savings", "net_cash_flow"]
++    assert monthly.iloc[0]["net_cash_flow"] == D("1000.00") - D("255.00") - D("100.00")
++
++
++def test_savings_is_an_outflow_of_cash_consistent_with_existing_model(ledger: Ledger) -> None:
++    ledger.add("500.00", "in", "income")
++    ledger.add("200.00", "out", "savings")
++    ledger.session.commit()
++
++    s = cashflow_summary(ledger.session, DAY, DAY)
++    assert (s["savings"], s["expenses"], s["net_cash_flow"]) == (D("200.00"), D("0"), D("300.00"))
++    # a savings *withdrawal* (inflow) is neither income nor lost
++    ledger.add("50.00", "in", "savings")
++    ledger.session.commit()
++    s = cashflow_summary(ledger.session, DAY, DAY)
++    assert (s["income"], s["other_in"], s["net_cash_flow"]) == (D("500.00"), D("50.00"), D("350.00"))

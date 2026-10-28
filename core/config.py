@@ -11,8 +11,14 @@ load_dotenv(ROOT_DIR / ".env")
 DATABASE_URL: str = os.getenv("DATABASE_URL") or ""
 TEST_DATABASE_URL: str | None = os.getenv("TEST_DATABASE_URL")
 PG_DUMP_PATH: str | None = os.getenv("PG_DUMP_PATH")
-GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY") or None
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash-lite"
+OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
+OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL") or "llama3.2"
+try:
+    OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
+except ValueError as exc:
+    raise RuntimeError("OLLAMA_TIMEOUT_SECONDS must be a positive whole number.") from exc
+if OLLAMA_TIMEOUT_SECONDS < 1:
+    raise RuntimeError("OLLAMA_TIMEOUT_SECONDS must be a positive whole number.")
 
 QPAY_FEE_ACCOUNTS: frozenset[str] = frozenset(
     account.strip()

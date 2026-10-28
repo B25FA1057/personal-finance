@@ -11,9 +11,18 @@ from openpyxl import Workbook, load_workbook
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from core.db import get_session, init_db
 from core.enrich import enrich, link_fees, normalize_account
-from core.importer import import_file
-from core.models import Base, Category, Rule, Transaction
+from core.importer import import_file, preview_file
+from core.models import (
+    Account,
+    Bank,
+    Base,
+    Category,
+    ImportBatch,
+    Rule,
+    Transaction,
+)
 from core.parsers.golomt import GolomtParser
 from core.parsers.registry import detect_parser
 
@@ -278,6 +287,38 @@ def test_import_is_idempotent_links_fee_and_classifies(db_session: Session) -> N
     assert db_session.execute(select(Transaction)).scalars().all()
 
 
+def test_import_preview_reports_duplicates_without_writing_data(
+    db_session: Session,
+) -> None:
+    data = _statement_bytes()
+    initial = preview_file(db_session, data)
+    assert initial.total_rows == 3
+    assert initial.duplicate_rows == 0
+    assert initial.already_imported is False
+    assert initial.detected_columns == (
+        "Гүйлгээний огноо",
+        "Эхний үлдэгдэл",
+        "Зарлага",
+        "Орлого",
+        "Эцсийн үлдэгдэл",
+        "Гүйлгээний утга",
+        "Харьцсан данс",
+    )
+    assert len(initial.sample_rows) == 3
+    assert db_session.execute(select(Transaction)).scalars().all() == []
+
+    import_file(db_session, data, "statement.xlsx")
+    repeated = preview_file(db_session, data)
+    overlapping = preview_file(
+        db_session, _statement_bytes(report_date="2026-01-15")
+    )
+
+    assert repeated.already_imported is True
+    assert repeated.duplicate_rows == 3
+    assert overlapping.already_imported is False
+    assert overlapping.duplicate_rows == 3
+
+
 def test_duplicate_reimport_preserves_manual_category(db_session: Session) -> None:
     manual_category = Category(name="Manual review", kind="expense")
     db_session.add(manual_category)
@@ -317,3 +358,68 @@ def test_import_failure_rolls_back_without_creating_records(db_session: Session)
         import_file(db_session, buffer.getvalue(), "unsupported.xlsx")
 
     assert db_session.execute(select(Transaction)).scalars().all() == []
+
+
+def test_init_db_preserves_existing_transactions_categories_and_rules(
+    tmp_path,
+) -> None:
+    db_url = f"sqlite:///{(tmp_path / 'existing-finance.db').as_posix()}"
+    engine = create_engine(db_url)
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, expire_on_commit=False)()
+
+    bank = Bank(code="TEST", name="Synthetic Bank")
+    category = Category(name="Approved category", kind="expense")
+    session.add_all([bank, category])
+    session.flush()
+    account = Account(bank_id=bank.id, account_no="synthetic-account")
+    batch = ImportBatch(
+        account_id=None,
+        file_sha256="a" * 64,
+        total_rows=1,
+        new_rows=1,
+        duplicate_rows=0,
+    )
+    session.add_all([account, batch])
+    session.flush()
+    batch.account_id = account.id
+    transaction = Transaction(
+        account_id=account.id,
+        batch_id=batch.id,
+        posted_at=datetime(2026, 1, 2, 10),
+        txn_at=datetime(2026, 1, 2, 10),
+        amount=Decimal("10.00"),
+        direction="out",
+        description="Synthetic merchant",
+        merchant="Synthetic merchant",
+        txn_type="card",
+        category_id=category.id,
+        category_source="manual",
+        raw={},
+        dedupe_hash="b" * 64,
+    )
+    rule = Rule(
+        priority=5,
+        field="merchant",
+        match_type="equals",
+        pattern="Synthetic merchant",
+        category_id=category.id,
+        active=True,
+    )
+    session.add_all([transaction, rule])
+    session.commit()
+    transaction_id = transaction.id
+    category_id = category.id
+    rule_id = rule.id
+    session.close()
+    engine.dispose()
+
+    init_db(db_url)
+
+    with get_session(db_url) as verify_session:
+        preserved = verify_session.get(Transaction, transaction_id)
+        assert preserved is not None
+        assert preserved.category_id == category_id
+        assert preserved.category_source == "manual"
+        assert verify_session.get(Category, category_id).name == "Approved category"
+        assert verify_session.get(Rule, rule_id).pattern == "Synthetic merchant"

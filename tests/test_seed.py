@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -8,8 +10,23 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from core.classify import classify_one
 from core.db import get_session
-from core.models import Bank, Category, Counterparty, OwnAccount, Rule, Transaction
-from core.seed import DEFAULT_CATEGORIES, DEFAULT_RULES, main, seed
+from core.models import (
+    Account,
+    Bank,
+    Category,
+    Counterparty,
+    ImportBatch,
+    OwnAccount,
+    Rule,
+    Transaction,
+)
+from core.seed import (
+    DEFAULT_CATEGORIES,
+    DEFAULT_RULES,
+    main,
+    seed,
+    seed_default_categories,
+)
 
 
 @pytest.fixture
@@ -102,6 +119,68 @@ def test_seeding_is_idempotent_and_preserves_user_data(db_session: Session) -> N
             Rule.pattern == "fee",
         )
     ) == 1
+
+
+def test_default_category_initialization_preserves_user_categories_and_transactions(
+    db_session: Session,
+) -> None:
+    custom_category = Category(
+        name="Groceries",
+        kind="savings",
+        sort_order=777,
+        is_default=False,
+    )
+    bank = Bank(code="TEST", name="Test Bank")
+    db_session.add_all([custom_category, bank])
+    db_session.flush()
+    account = Account(account_no="TEST-ACCOUNT", bank_id=bank.id)
+    db_session.add(account)
+    db_session.flush()
+    batch = ImportBatch(file_sha256="a" * 64, account_id=account.id)
+    db_session.add(batch)
+    db_session.flush()
+    transaction = Transaction(
+        account_id=account.id,
+        batch_id=batch.id,
+        posted_at=datetime(2026, 1, 1),
+        txn_at=datetime(2026, 1, 1),
+        amount=Decimal("125.00"),
+        direction="out",
+        description="Existing manually categorized transaction",
+        txn_type="purchase",
+        category_id=custom_category.id,
+        category_source="manual",
+        raw={},
+        dedupe_hash="b" * 64,
+    )
+    db_session.add(transaction)
+    db_session.commit()
+    original_transaction = tuple(
+        getattr(transaction, column.key) for column in Transaction.__table__.columns
+    )
+
+    added, skipped = seed_default_categories(db_session)
+    db_session.commit()
+    assert (added, skipped) == (
+        len(DEFAULT_CATEGORIES) - 1,
+        1,
+    )
+
+    added_again, skipped_again = seed_default_categories(db_session)
+    db_session.commit()
+    assert (added_again, skipped_again) == (0, len(DEFAULT_CATEGORIES))
+    assert db_session.scalar(
+        select(func.count(Category.id)).where(Category.name.ilike("groceries"))
+    ) == 1
+    assert (
+        custom_category.kind,
+        custom_category.sort_order,
+        custom_category.is_default,
+    ) == ("savings", 777, False)
+    assert tuple(
+        getattr(transaction, column.key) for column in Transaction.__table__.columns
+    ) == original_transaction
+    assert db_session.scalar(select(func.count(Transaction.id))) == 1
 
 
 def test_seeded_fee_rules_match_specific_descriptions_only(db_session: Session) -> None:

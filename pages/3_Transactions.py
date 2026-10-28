@@ -8,9 +8,15 @@ import streamlit as st
 from sqlalchemy import select
 
 from core.ai_categorization import refresh_import_summary
-from core.classify import classify_transactions, reapply_all
+from core.classify import classify_transactions, reapply_all, upsert_exact_rule
 from core.db import get_session
-from core.models import Account, CategorizationSuggestion, Category, Transaction
+from core.enrich import normalize_merchant
+from core.models import (
+    Account,
+    CategorizationSuggestion,
+    Category,
+    Transaction,
+)
 from core.queries import (
     category_options,
     merchant_options,
@@ -28,9 +34,6 @@ TRANSACTION_TYPES = [
     "own_transfer",
     "other",
 ]
-PAGE_SIZE = 100
-
-
 @dataclass(frozen=True)
 class TransactionEdit:
     id: int
@@ -38,6 +41,7 @@ class TransactionEdit:
     txn_type: str
     category_id: int | None
     note: str | None
+    learn_merchant_rule: bool
 
 
 st.title("Transactions")
@@ -92,6 +96,7 @@ with st.sidebar:
         default=TRANSACTION_TYPES,
     )
     search = st.text_input("Search descriptions, merchants, or accounts")
+    page_size = st.selectbox("Rows per page", [25, 50, 100, 250], index=2)
 
 if start_date > end_date:
     st.error("The start date must be on or before the end date.")
@@ -110,7 +115,7 @@ filters = {
 }
 with get_session() as session:
     matching_count = transaction_count(session, **filters)
-    page_count = max(1, (matching_count + PAGE_SIZE - 1) // PAGE_SIZE)
+    page_count = max(1, (matching_count + page_size - 1) // page_size)
     current_page = min(max(1, int(st.session_state.get("transaction_page", 1))), page_count)
     st.session_state.transaction_page = current_page
 
@@ -123,15 +128,36 @@ with get_session() as session:
         st.session_state.transaction_page = current_page + 1
         st.rerun()
     summary_col.caption(
-        f"{matching_count:,} matching transaction(s) · {PAGE_SIZE} per page"
+        f"{matching_count:,} matching transaction(s) · {page_size} per page"
     )
     original = transactions_df(
         session,
         **filters,
-        limit=PAGE_SIZE,
-        offset=(int(current_page) - 1) * PAGE_SIZE,
+        limit=page_size,
+        offset=(int(current_page) - 1) * page_size,
     )
     category_names = category_options(session)
+    suggestions = session.execute(
+        select(
+            CategorizationSuggestion.transaction_id,
+            Category.name,
+            CategorizationSuggestion.confidence,
+        )
+        .join(Category, Category.id == CategorizationSuggestion.category_id)
+        .where(
+            CategorizationSuggestion.transaction_id.in_(original["id"].tolist()),
+            CategorizationSuggestion.status == "pending",
+        )
+    ).all()
+    suggestion_by_id = {
+        int(row.transaction_id): f"{row.name} ({float(row.confidence):.0%})"
+        for row in suggestions
+    }
+
+original["AI suggestion (pending)"] = [
+    suggestion_by_id.get(int(transaction_id), "")
+    for transaction_id in original["id"]
+]
 
 if original.empty:
     st.info("No transactions match these filters.")
@@ -154,6 +180,7 @@ kpi_uncategorized.metric("Uncategorized (this page)", uncategorized_count)
 
 editor = original.copy()
 editor["category"] = editor["category"].fillna("")
+editor["learn_merchant_rule"] = False
 edited = st.data_editor(
     editor,
     use_container_width=True,
@@ -170,6 +197,7 @@ edited = st.data_editor(
         "merchant",
         "category_kind",
         "category_source",
+        "AI suggestion (pending)",
     ],
     column_config={
         "id": None,
@@ -186,6 +214,12 @@ edited = st.data_editor(
         "category": st.column_config.SelectboxColumn(
             "Category", options=["", *category_names]
         ),
+        "AI suggestion (pending)": st.column_config.TextColumn(
+            "AI suggestion · pending"
+        ),
+        "learn_merchant_rule": st.column_config.CheckboxColumn(
+            "Create/update merchant rule", help="Applies to future imports only."
+        ),
         "txn_type": st.column_config.SelectboxColumn(
             "Transaction type", options=TRANSACTION_TYPES, required=True
         ),
@@ -200,6 +234,7 @@ if st.button("Save changes", type="primary"):
     validation_errors: list[str] = []
     updates: list[TransactionEdit] = []
     seen_ids: set[int] = set()
+    learned_rules: dict[str, int] = {}
     for row_number, row in enumerate(edited_rows, start=1):
         try:
             txn_id = int(row["id"])
@@ -229,6 +264,29 @@ if st.button("Save changes", type="primary"):
             validation_errors.append(f"Row {row_number}: choose an existing category.")
         raw_note = row.get("note")
         note = None if raw_note is None or pd.isna(raw_note) else str(raw_note).strip() or None
+        learn_merchant_rule = bool(row.get("learn_merchant_rule", False))
+        merchant_value = original_by_id.loc[txn_id, "merchant"]
+        if learn_merchant_rule and (
+            pd.isna(merchant_value) or not str(merchant_value).strip()
+        ):
+            validation_errors.append(
+                f"Row {row_number}: this transaction has no merchant for a reusable rule."
+            )
+        if learn_merchant_rule and not category_name:
+            validation_errors.append(
+                f"Row {row_number}: choose a category before creating a merchant rule."
+            )
+        if learn_merchant_rule and category_name:
+            normalized_merchant = normalize_merchant(str(merchant_value))
+            category_id = category_ids_by_name[category_name]
+            prior_category_id = learned_rules.setdefault(
+                normalized_merchant, category_id
+            )
+            if prior_category_id != category_id:
+                validation_errors.append(
+                    f"Row {row_number}: selected transactions use the same normalized "
+                    "merchant but have conflicting categories for a reusable rule."
+                )
         updates.append(
             TransactionEdit(
                 id=txn_id,
@@ -236,6 +294,7 @@ if st.button("Save changes", type="primary"):
                 txn_type=txn_type,
                 category_id=category_ids_by_name.get(category_name),
                 note=note,
+                learn_merchant_rule=learn_merchant_rule,
             )
         )
 
@@ -311,6 +370,14 @@ if st.button("Save changes", type="primary"):
                     if txn.note != update.note:
                         txn.note = update.note
                         changed_count += 1
+                    if update.learn_merchant_rule:
+                        merchant = normalize_merchant(str(txn.merchant or ""))
+                        upsert_exact_rule(
+                            session,
+                            field="merchant",
+                            pattern=merchant,
+                            category_id=int(update.category_id),
+                        )
                 if reclassify_ids:
                     classify_transactions(session, list(dict.fromkeys(reclassify_ids)))
                 for batch_id in batch_ids_to_refresh:

@@ -60,6 +60,45 @@ def classify_one(txn: Transaction, rules: list[Rule]) -> tuple[int | None, str]:
     return None, "none"
 
 
+def upsert_exact_rule(
+    session: Session,
+    *,
+    field: str,
+    pattern: str,
+    category_id: int,
+) -> Rule:
+    normalized_pattern = pattern.strip()
+    if not normalized_pattern or len(normalized_pattern) > 300:
+        raise ValueError("The exact-match rule pattern must be between 1 and 300 characters.")
+    if field not in {"merchant", "description"}:
+        raise ValueError("Exact-match rules can only target a merchant or description.")
+
+    rule = session.scalar(
+        select(Rule)
+        .where(
+            Rule.field == field,
+            Rule.match_type == "equals",
+            Rule.pattern == normalized_pattern,
+        )
+        .order_by(Rule.priority, Rule.id)
+    )
+    if rule is None:
+        rule = Rule(
+            priority=5,
+            field=field,
+            match_type="equals",
+            pattern=normalized_pattern,
+            category_id=category_id,
+            active=True,
+        )
+        session.add(rule)
+    else:
+        rule.priority = min(rule.priority, 5)
+        rule.category_id = category_id
+        rule.active = True
+    return rule
+
+
 def classify_transactions(session: Session, txn_ids: list[int] | None = None) -> int:
     if txn_ids is None:
         stmt = select(Transaction)

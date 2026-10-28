@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from io import BytesIO
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -40,6 +42,89 @@ class ImportResult:
     pending_review: int = 0
     errors: list[str] = field(default_factory=list)
     ai_status: str = "disabled"
+
+
+@dataclass(frozen=True)
+class ImportPreview:
+    bank_code: str
+    bank_name: str
+    period_from: str | None
+    period_to: str | None
+    total_rows: int
+    duplicate_rows: int
+    already_imported: bool
+    detected_columns: tuple[str, ...] = ()
+    sample_rows: tuple[dict[str, str], ...] = ()
+
+
+def _parse_statement(data: bytes):
+    try:
+        workbook = load_workbook(BytesIO(data), data_only=True, read_only=True)
+    except (BadZipFile, InvalidFileException, OSError, ValueError) as exc:
+        raise ValueError("The uploaded file is not a valid Excel workbook.") from exc
+    try:
+        parser = detect_parser(workbook)
+        statement = parser.parse(workbook)
+    finally:
+        workbook.close()
+    if not statement.account_no.strip():
+        raise ValueError("The statement does not contain an account number.")
+    return statement
+
+
+def preview_file(session: Session, data: bytes) -> ImportPreview:
+    file_hash = file_sha256(data)
+    existing_batch = session.scalar(
+        select(ImportBatch).where(ImportBatch.file_sha256 == file_hash)
+    )
+    if existing_batch is not None:
+        return ImportPreview(
+            bank_code="",
+            bank_name="",
+            period_from=(
+                existing_batch.period_from.isoformat()
+                if existing_batch.period_from
+                else None
+            ),
+            period_to=(
+                existing_batch.period_to.isoformat()
+                if existing_batch.period_to
+                else None
+            ),
+            total_rows=existing_batch.total_rows or 0,
+            duplicate_rows=existing_batch.total_rows or 0,
+            already_imported=True,
+        )
+
+    statement = _parse_statement(data)
+    duplicate_rows = 0
+    seen_hashes: set[str] = set()
+    for transaction in statement.transactions:
+        dedupe_hash = txn_hash(statement.account_no, transaction)
+        if dedupe_hash in seen_hashes or session.scalar(
+            select(Transaction.id).where(Transaction.dedupe_hash == dedupe_hash)
+        ) is not None:
+            duplicate_rows += 1
+        seen_hashes.add(dedupe_hash)
+    return ImportPreview(
+        bank_code=statement.bank_code,
+        bank_name=statement.bank_name,
+        period_from=statement.period_from.isoformat() if statement.period_from else None,
+        period_to=statement.period_to.isoformat() if statement.period_to else None,
+        total_rows=len(statement.transactions),
+        duplicate_rows=duplicate_rows,
+        already_imported=False,
+        detected_columns=statement.source_columns,
+        sample_rows=tuple(
+            {
+                "Date": transaction.posted_at.strftime("%Y-%m-%d %H:%M"),
+                "Direction": transaction.direction,
+                "Amount": f"{transaction.amount:,.2f}",
+                "Description": transaction.description,
+            }
+            for transaction in statement.transactions[:5]
+        ),
+    )
 
 
 def import_file(
@@ -87,11 +172,7 @@ def _import_file(
             ai_status=summary.ai_status if summary else "disabled",
         )
 
-    workbook = load_workbook(BytesIO(data), data_only=True)
-    parser = detect_parser(workbook)
-    statement = parser.parse(workbook)
-    if not statement.account_no.strip():
-        raise ValueError("The statement does not contain an account number")
+    statement = _parse_statement(data)
 
     bank = session.execute(select(Bank).where(Bank.code == statement.bank_code)).scalar_one_or_none()
     if bank is None:
@@ -254,7 +335,7 @@ def _import_file(
             ai_result = suggest_categories(session, list(uncategorized_ids))
             ai_suggestions = ai_result.suggestions
             if ai_result.error:
-                errors.append(ai_result.error)
+                errors.extend(ai_result.batch_errors or [ai_result.error])
                 ai_status = "partial" if ai_suggestions else "failed"
             elif ai_result.disabled:
                 ai_status = "disabled"

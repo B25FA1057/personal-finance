@@ -109,6 +109,83 @@ def budget_actuals_df(session: Session, year: int, month: int) -> pd.DataFrame:
     )
 
 
+def budget_performance_df(
+    session: Session,
+    date_from: date | datetime,
+    date_to: date | datetime,
+) -> pd.DataFrame:
+    first_month = date_from.date() if isinstance(date_from, datetime) else date_from
+    last_month = date_to.date() if isinstance(date_to, datetime) else date_to
+    first_month = first_month.replace(day=1)
+    last_month = last_month.replace(day=1)
+
+    transaction_year = extract("year", Transaction.txn_at)
+    transaction_month = extract("month", Transaction.txn_at)
+    budget_year = extract("year", MonthlyBudget.month_start)
+    budget_month = extract("month", MonthlyBudget.month_start)
+    actuals = (
+        select(
+            Transaction.category_id.label("category_id"),
+            transaction_year.label("year"),
+            transaction_month.label("month"),
+            func.sum(
+                case(
+                    (Transaction.direction == "out", Transaction.amount),
+                    else_=-Transaction.amount,
+                )
+            ).label("actual"),
+        )
+        .join(Category, Category.id == Transaction.category_id)
+        .where(
+            *_dashboard_date_filters(date_from, date_to),
+            Transaction.direction.in_(["in", "out"]),
+            Category.kind == "expense",
+        )
+        .group_by(
+            Transaction.category_id,
+            transaction_year,
+            transaction_month,
+        )
+        .subquery()
+    )
+    statement = (
+        select(
+            MonthlyBudget.month_start,
+            Category.name.label("category"),
+            MonthlyBudget.currency,
+            MonthlyBudget.amount.label("budget"),
+            func.coalesce(actuals.c.actual, 0).label("actual"),
+        )
+        .join(Category, Category.id == MonthlyBudget.category_id)
+        .outerjoin(
+            actuals,
+            and_(
+                actuals.c.category_id == MonthlyBudget.category_id,
+                actuals.c.year == budget_year,
+                actuals.c.month == budget_month,
+            ),
+        )
+        .where(
+            MonthlyBudget.month_start >= first_month,
+            MonthlyBudget.month_start <= last_month,
+        )
+        .order_by(MonthlyBudget.month_start, Category.sort_order, Category.name)
+    )
+    return pd.DataFrame(
+        [
+            {
+                "month": row.month_start.strftime("%Y-%m"),
+                "category": row.category,
+                "currency": row.currency,
+                "budget": Decimal(row.budget),
+                "actual": Decimal(row.actual),
+            }
+            for row in session.execute(statement).all()
+        ],
+        columns=["month", "category", "currency", "budget", "actual"],
+    )
+
+
 def unreviewed_counterparties_df(
     session: Session, include_reviewed: bool = False
 ) -> pd.DataFrame:
@@ -559,6 +636,41 @@ def uncategorized_cashflow_totals(
     )
     row = session.execute(statement).one()
     return Decimal(row.incoming), Decimal(row.outgoing)
+
+
+def monthly_uncategorized_outflows_df(
+    session: Session,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+) -> pd.DataFrame:
+    year = extract("year", Transaction.txn_at).label("year")
+    month = extract("month", Transaction.txn_at).label("month")
+    statement = (
+        select(
+            year,
+            month,
+            func.sum(Transaction.amount).label("amount"),
+        )
+        .select_from(Transaction)
+        .outerjoin(Category, Category.id == Transaction.category_id)
+        .where(
+            *_dashboard_date_filters(date_from, date_to),
+            Transaction.category_id.is_(None),
+            Transaction.direction == "out",
+        )
+        .group_by(year, month)
+        .order_by(year, month)
+    )
+    return pd.DataFrame(
+        [
+            {
+                "month": f"{int(row.year):04d}-{int(row.month):02d}",
+                "amount": Decimal(row.amount),
+            }
+            for row in session.execute(statement).all()
+        ],
+        columns=["month", "amount"],
+    )
 
 
 def internal_transfer_totals(

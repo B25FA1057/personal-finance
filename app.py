@@ -1,47 +1,45 @@
 from __future__ import annotations
 
 import streamlit as st
-from sqlalchemy import func, select
 
-from core.db import get_session, init_db
-from core.models import ImportBatch, Transaction
-from core.queries import batches_df, unreviewed_counterparties_df
+from core.db import init_db
+from core.ui import apply_app_style
 
-st.set_page_config(page_title="My Finance", layout="wide")
+st.set_page_config(
+    page_title="Personal Finance",
+    page_icon=":material/account_balance_wallet:",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 init_db()
+apply_app_style()
 
-st.title("My Finance")
-st.caption("Your local personal finance overview")
-
-with get_session() as session:
-    transactions_count = session.scalar(select(func.count(Transaction.id))) or 0
-    start_date = session.scalar(select(func.min(Transaction.txn_at)))
-    end_date = session.scalar(select(func.max(Transaction.txn_at)))
-    review_count = len(unreviewed_counterparties_df(session))
-    last_import = session.scalar(select(func.max(ImportBatch.imported_at)))
-    recent_imports = batches_df(session).head(10)
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Transactions", transactions_count)
-c2.metric(
-    "Date range",
-    f"{start_date.date() if start_date else 'n/a'} → {end_date.date() if end_date else 'n/a'}",
-)
-c3.metric("Needs review", review_count)
-c4.metric("Last import", last_import.strftime("%Y-%m-%d %H:%M") if last_import else "n/a")
-
-nav_upload, nav_review, nav_transactions = st.columns(3)
-nav_upload.page_link("pages/1_Upload.py", label="Upload statements")
-nav_review.page_link("pages/2_Review.py", label="Review merchants & people")
-nav_transactions.page_link("pages/3_Transactions.py", label="Browse transactions")
-nav_dashboard, nav_budgets, nav_goals = st.columns(3)
-nav_dashboard.page_link("pages/4_Dashboard.py", label="Open dashboard")
-nav_budgets.page_link("pages/6_Budgets.py", label="Manage budgets")
-nav_goals.page_link("pages/7_Savings_Goals.py", label="Savings goals")
-
-st.subheader("Recent imports")
-if recent_imports.empty:
-    st.info("No imports yet.")
-else:
-    st.dataframe(recent_imports, use_container_width=True, hide_index=True)
+pages = {
+    "Overview": [
+        st.Page(
+            "pages/4_Dashboard.py",
+            title="Dashboard",
+            icon=":material/dashboard:",
+            default=True,
+        ),
+        st.Page(
+            "pages/8_Reports.py",
+            title="Reports",
+            icon=":material/assessment:",
+        ),
+    ],
+    "Activity": [
+        st.Page("pages/3_Transactions.py", title="Transactions", icon=":material/swap_vert:"),
+        st.Page("pages/1_Upload.py", title="Import statements", icon=":material/upload_file:"),
+        st.Page("pages/2_Review.py", title="Review categories", icon=":material/rule:"),
+    ],
+    "Planning": [
+        st.Page("pages/6_Budgets.py", title="Budgets", icon=":material/savings:"),
+        st.Page("pages/7_Savings_Goals.py", title="Savings goals", icon=":material/flag:"),
+    ],
+    "Preferences": [
+        st.Page("pages/5_Settings.py", title="Settings", icon=":material/settings:"),
+    ],
+}
+st.navigation(pages).run()

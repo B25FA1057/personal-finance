@@ -168,6 +168,11 @@ class GolomtParser(BankParser):
             period_to=period_to,
             transactions=transactions,
             warnings=warnings,
+            source_columns=tuple(
+                _text(sheet.cell(row=2, column=column).value)
+                for column in range(1, 8)
+                if _text(sheet.cell(row=2, column=column).value)
+            ),
         )
 
     @staticmethod

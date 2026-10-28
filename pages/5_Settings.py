@@ -19,6 +19,7 @@ from core.models import (
     Transaction,
 )
 from core.queries import batches_df, categories_df
+from core.seed import seed_default_categories
 
 
 def _normalize_account(value: str | None) -> str | None:
@@ -46,6 +47,29 @@ categories_tab, rules_tab, accounts_tab, imports_tab = st.tabs(
 
 with categories_tab:
     st.subheader("Categories")
+    st.caption(
+        "Add any missing built-in categories without changing existing categories "
+        "or transaction classifications."
+    )
+    if st.button(
+        "Initialize missing default categories",
+        key="initialize_default_categories",
+    ):
+        try:
+            added, skipped = seed_default_categories(session)
+            session.commit()
+            st.success(
+                f"Default categories initialized: {added} added, {skipped} already present/skipped."
+            )
+            session.close()
+            st.rerun()
+        except IntegrityError:
+            session.rollback()
+            st.error(
+                "Could not initialize default categories because another category "
+                "was added at the same time. Refresh and retry."
+            )
+
     categories_table = categories_df(session)
     edited_categories = st.data_editor(
         categories_table,

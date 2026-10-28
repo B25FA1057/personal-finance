@@ -9,8 +9,8 @@ from core.ai_categorization import (
     eligible_category_options,
     eligible_transaction_count,
     resolve_suggestion,
-    suggest_categories,
 )
+from core.categorization_jobs import enqueue_categorization
 from core.classify import classify_transactions
 from core.db import get_session
 from core.models import (
@@ -24,6 +24,7 @@ from core.queries import (
     category_options,
     unreviewed_counterparties_df,
 )
+from core.ui import remember_categorization_job, render_categorization_jobs
 
 
 st.title("Review categories")
@@ -34,14 +35,13 @@ st.caption(
     "or edit it. Verified own-account transfers are never sent for AI categorization."
 )
 
-if not config.GEMINI_API_KEY:
-    st.info(
-        "Gemini is not configured. Set GEMINI_API_KEY in your local environment to enable "
-        "suggestions; existing transaction review remains available."
-    )
+st.info(
+    f"AI suggestions run locally through Ollama ({config.OLLAMA_MODEL}); "
+    "transaction data is not sent to a cloud AI provider."
+)
 
 with get_session() as session:
-    eligible_count = eligible_transaction_count(session, include_pending=True)
+    eligible_count = eligible_transaction_count(session)
     categories = list(session.scalars(select(Category).order_by(Category.kind, Category.name)))
     pending = session.execute(
         select(
@@ -70,33 +70,24 @@ with get_session() as session:
         .order_by(Transaction.txn_at.desc(), Transaction.id.desc())
     ).all()
 
-if config.GEMINI_API_KEY:
-    st.caption(f"{eligible_count} eligible uncategorized transaction(s) can be categorized.")
-    ai_consent = st.checkbox(
-        "I agree to send merchant names and redacted transaction descriptions, direction, "
-        "and transaction type to Google Gemini. Account numbers, amounts, and dates are not sent.",
-        value=False,
-        key="review_ai_consent",
-    )
-    st.caption(
-        "Google's Gemini API free-tier terms may allow submitted content to be used to improve "
-        "Google products. Check the current terms before enabling AI categorization."
-    )
-    if st.button(
-        "Run or refresh suggestions for eligible unreviewed transactions",
-        disabled=not ai_consent or eligible_count == 0,
-        key="run_ai_review",
-    ):
-        with get_session() as session:
-            result = suggest_categories(session, include_pending=True)
-            session.commit()
-        if result.error:
-            st.error(result.error)
-        elif result.disabled:
-            st.info("Gemini categorization is disabled.")
-        else:
-            st.success(f"Generated or refreshed {result.suggestions} suggestion(s).")
-        st.rerun()
+st.caption(f"{eligible_count} uncategorized transaction(s) can be categorized.")
+ai_consent = st.checkbox(
+    "I agree to run local Ollama categorization using redacted transaction details.",
+    value=False,
+    key="review_ai_consent",
+)
+if st.button(
+    "Categorize eligible transactions in the background",
+    disabled=not ai_consent or eligible_count == 0,
+    key="run_ai_review",
+):
+    job_id = enqueue_categorization(None, retry=True)
+    remember_categorization_job(job_id)
+    st.rerun()
+
+job_ids = list(st.session_state.get("categorization_job_ids", []))
+if job_ids:
+    render_categorization_jobs(job_ids)
 
 if pending:
     pending_frame = pd.DataFrame(

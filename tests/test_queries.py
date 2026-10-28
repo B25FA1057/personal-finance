@@ -8,12 +8,23 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from core.models import Account, Bank, Base, Category, Counterparty, ImportBatch, Transaction
+from core.models import (
+    Account,
+    Bank,
+    Base,
+    Category,
+    Counterparty,
+    ImportBatch,
+    MonthlyBudget,
+    Transaction,
+)
 from core.queries import (
+    budget_performance_df,
     expense_categories_df,
     expense_trend_df,
     internal_transfer_totals,
     monthly_cashflow_df,
+    monthly_uncategorized_outflows_df,
     top_merchant_expenses_df,
     transaction_count,
     transactions_df,
@@ -281,6 +292,9 @@ def test_dashboard_sql_aggregations_exclude_internal_transfers(db_session: Sessi
     db_session.commit()
 
     monthly = monthly_cashflow_df(db_session, test_date, test_date)
+    monthly_outflows = monthly_uncategorized_outflows_df(
+        db_session, test_date, test_date
+    )
     categories = expense_categories_df(db_session, test_date, test_date)
     trends = expense_trend_df(db_session, date_from=test_date, date_to=test_date)
     merchants = top_merchant_expenses_df(db_session, test_date, test_date)
@@ -301,6 +315,9 @@ def test_dashboard_sql_aggregations_exclude_internal_transfers(db_session: Sessi
     assert categories.iloc[0]["amount"] == Decimal("255.00")
     assert trends.iloc[0]["amount"] == Decimal("255.00")
     assert merchants.iloc[0]["amount"] == Decimal("250.00")
+    assert monthly_outflows.to_dict("records") == [
+        {"month": "2026-10", "amount": Decimal("20.00")}
+    ]
     assert transfer_in == Decimal("10500.00")
     assert transfer_out == Decimal("2000.00")
 
@@ -346,6 +363,9 @@ def test_uncategorized_cashflow_includes_inflows_but_excludes_own_transfers(
     db_session.commit()
 
     monthly = monthly_cashflow_df(db_session, test_date, test_date)
+    monthly_outflows = monthly_uncategorized_outflows_df(
+        db_session, test_date, test_date
+    )
     uncat_in, uncat_out = uncategorized_cashflow_totals(
         db_session, test_date, test_date
     )
@@ -358,6 +378,9 @@ def test_uncategorized_cashflow_includes_inflows_but_excludes_own_transfers(
     assert monthly.iloc[0]["uncategorized_income"] == Decimal("25.00")
     assert monthly.iloc[0]["expenses"] == Decimal("0.00")
     assert monthly.iloc[0]["net_cash_flow"] == Decimal("25.00")
+    assert monthly_outflows.to_dict("records") == [
+        {"month": "2026-10", "amount": Decimal("8.00")}
+    ]
     assert uncat_in == Decimal("25.00")
     assert uncat_out == Decimal("8.00")
     assert internal_in == Decimal("500.00")
@@ -405,3 +428,69 @@ def test_categorized_refund_reduces_expenses_without_inflating_income(
     assert categories.iloc[0]["amount"] == Decimal("40.00")
     assert trends.iloc[0]["amount"] == Decimal("40.00")
     assert merchants.iloc[0]["amount"] == Decimal("40.00")
+
+
+def test_budget_performance_uses_monthly_actuals_and_excludes_transfers(
+    db_session: Session,
+) -> None:
+    expense = Category(name="Dining", kind="expense")
+    transfer = Category(name="Transfers", kind="transfer")
+    counterparty = Counterparty(key="M:SHOP", kind="merchant", display_name="Shop")
+    db_session.add_all([expense, transfer, counterparty])
+    db_session.flush()
+    db_session.add_all(
+        [
+            MonthlyBudget(
+                category_id=expense.id,
+                month_start=date(2026, 10, 1),
+                amount=Decimal("100.00"),
+                currency="MNT",
+            ),
+            MonthlyBudget(
+                category_id=expense.id,
+                month_start=date(2026, 11, 1),
+                amount=Decimal("150.00"),
+                currency="MNT",
+            ),
+        ]
+    )
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 20, 10),
+        category=expense,
+        counterparty=counterparty,
+        description="Purchase",
+        amount=Decimal("50.00"),
+    )
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 21, 10),
+        category=expense,
+        counterparty=counterparty,
+        description="Refund",
+        amount=Decimal("10.00"),
+        direction="in",
+    )
+    _add_txn(
+        db_session,
+        posted_at=datetime(2026, 10, 22, 10),
+        category=transfer,
+        counterparty=counterparty,
+        description="Own transfer",
+        amount=Decimal("500.00"),
+    )
+    db_session.commit()
+
+    performance = budget_performance_df(
+        db_session, date(2026, 10, 1), date(2026, 10, 31)
+    )
+
+    assert performance.to_dict("records") == [
+        {
+            "month": "2026-10",
+            "category": "Dining",
+            "currency": "MNT",
+            "budget": Decimal("100.00"),
+            "actual": Decimal("40.00"),
+        }
+    ]

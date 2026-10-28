@@ -38,6 +38,7 @@ class StatementData:
     period_to: date | None = None
     transactions: list[RawTxn] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    source_columns: tuple[str, ...] = ()
 
 
 class BankParser(ABC):
