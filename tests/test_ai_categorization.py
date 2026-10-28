@@ -706,6 +706,95 @@ def test_suggestion_parser_accepts_fenced_json_and_rejects_invalid_entries(
             )
 
 
+@pytest.mark.parametrize(
+    ("response_kind", "expected_suggestions", "expected_calls"),
+    [
+        ("valid", 1, 1),
+        ("unknown", 0, 2),
+        ("missing", 0, 2),
+        ("duplicate", 1, 1),
+        ("malformed", 0, 2),
+    ],
+)
+def test_mocked_ollama_references_are_validated_per_batch(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    response_kind: str,
+    expected_suggestions: int,
+    expected_calls: int,
+) -> None:
+    categories = _add_categories(db_session)
+    import_file(
+        db_session,
+        _statement_bytes(),
+        f"reference-{response_kind}.xlsx",
+        allow_ai=False,
+    )
+    calls: list[dict[str, object]] = []
+
+    def request_ollama(payload: dict[str, object]) -> str:
+        calls.append(payload)
+        if response_kind == "malformed":
+            return "{malformed"
+
+        request = json.loads(payload["messages"][1]["content"])
+        transaction_ref = request["transactions"][0]["transaction_ref"]
+        suggestion = {
+            "transaction_ref": transaction_ref,
+            "category_id": categories["Dining"].id,
+            "confidence": 0.9,
+            "rationale": "Matches the dining category.",
+        }
+        if response_kind == "valid":
+            suggestions = [suggestion]
+        elif response_kind == "unknown":
+            suggestions = [{**suggestion, "transaction_ref": "not-submitted"}]
+        elif response_kind == "duplicate":
+            suggestions = [suggestion, suggestion]
+        else:
+            suggestions = []
+        return json.dumps({"suggestions": suggestions})
+
+    monkeypatch.setattr(config, "OLLAMA_MODEL", "test-model")
+    monkeypatch.setattr(ai_categorization, "_request_ollama", request_ollama)
+
+    result = suggest_categories(db_session)
+
+    transaction = db_session.scalar(select(Transaction))
+    suggestions = list(db_session.scalars(select(CategorizationSuggestion)).all())
+    assert result.suggestions == expected_suggestions
+    assert len(suggestions) == expected_suggestions
+    assert len(calls) == expected_calls
+    assert all(
+        transaction.category_id is None and transaction.category_source == "none"
+        for transaction in db_session.scalars(select(Transaction))
+    )
+    if response_kind == "valid":
+        assert result.error is None
+        assert suggestions[0].transaction_id == transaction.id
+        assert suggestions[0].category_id == categories["Dining"].id
+    elif response_kind == "unknown":
+        assert result.error is not None
+        assert "unknown transaction reference" in result.error
+        assert "not-submitted" not in result.error
+    elif response_kind == "missing":
+        assert result.error is not None
+        assert "omitted one or more submitted transaction references" in result.error
+    elif response_kind == "duplicate":
+        assert result.error is not None
+        assert "duplicate transaction reference" in result.error
+    else:
+        assert result.error == "Ollama returned malformed JSON."
+        assert db_session.scalar(select(CategorizationSuggestion)) is None
+        request_refs = [
+            json.loads(call["messages"][1]["content"])["transactions"][0][
+                "transaction_ref"
+            ]
+            for call in calls
+        ]
+        assert request_refs[0] == request_refs[1]
+
+
 def test_invalid_ollama_suggestion_is_reported_and_import_still_completes(
     db_session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1055,12 +1144,12 @@ def test_background_job_reports_partial_failure_and_keeps_successful_suggestions
                 {
                     "suggestions": [
                         {
-                            "transaction_index": index,
+                            "transaction_ref": transaction["transaction_ref"],
                             "category_id": categories["Dining"].id,
                             "confidence": 0.9,
                             "rationale": "Matches the dining category.",
                         }
-                        for index, _ in enumerate(input_data["transactions"])
+                        for transaction in input_data["transactions"]
                     ]
                 }
             )
@@ -1224,12 +1313,12 @@ def test_background_failure_reports_progress_and_retry_creates_one_pending_sugge
                 {
                     "suggestions": [
                         {
-                            "transaction_index": index,
+                            "transaction_ref": transaction["transaction_ref"],
                             "category_id": categories["Dining"].id,
                             "confidence": 0.9,
                             "rationale": "Matches the dining category.",
                         }
-                        for index, _ in enumerate(input_data["transactions"])
+                        for transaction in input_data["transactions"]
                     ]
                 }
             )

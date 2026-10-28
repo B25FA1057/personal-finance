@@ -441,8 +441,9 @@ def _request_batch(
                         "credit to an expense category, not as income. Fees must use an expense category. "
                         "For outgoing transactions use expense, savings, or transfer categories; for "
                         "incoming transactions use income, expense, or transfer categories. Do not invent "
-                        "categories. Return one suggestion per supplied transaction, a confidence from 0 "
-                        "to 1, and a short rationale."
+                        "categories. Copy each transaction_ref exactly as supplied; do not invent, alter, "
+                        "or reuse a reference. Return one suggestion per supplied transaction, a "
+                        "confidence from 0 to 1, and a short rationale."
                         + (
                             " Your previous response failed validation. Return exactly one valid JSON "
                             "suggestion for every supplied transaction, with no markdown or extra text."
@@ -499,9 +500,13 @@ def suggest_categories(
             break
         batch = transactions[offset : offset + _BATCH_SIZE]
         transaction_references = [uuid4().hex for _ in batch]
-        transactions_by_reference = dict(zip(transaction_references, batch, strict=True))
+        transactions_by_reference = dict(
+            zip(transaction_references, batch, strict=True)
+        )
         suggestions: list[CategorizationSuggestion] | None = None
+        first_partial: _ParsedSuggestions | None = None
         batch_error: str | None = None
+        batch_diagnostics: list[str] = []
         for attempt in range(2):
             try:
                 response_text = _request_batch(
@@ -513,9 +518,27 @@ def suggest_categories(
                 parsed = _parse_suggestions(
                     response_text, transactions_by_reference, categories_by_id
                 )
-                suggestions = parsed.suggestions
-                if parsed.diagnostics:
-                    result.batch_errors.append("; ".join(parsed.diagnostics))
+                if (
+                    attempt == 0
+                    and any("omitted one or more" in item for item in parsed.diagnostics)
+                ):
+                    first_partial = parsed
+                    continue
+                if first_partial is not None and parsed.diagnostics:
+                    suggestions_by_transaction_id = {
+                        item.transaction_id: item
+                        for item in first_partial.suggestions
+                    }
+                    suggestions_by_transaction_id.update(
+                        {item.transaction_id: item for item in parsed.suggestions}
+                    )
+                    suggestions = list(suggestions_by_transaction_id.values())
+                    batch_diagnostics = list(
+                        dict.fromkeys(first_partial.diagnostics + parsed.diagnostics)
+                    )
+                else:
+                    suggestions = parsed.suggestions
+                    batch_diagnostics = parsed.diagnostics
                 break
             except InvalidModelResponse as exc:
                 batch_error = str(exc)
@@ -523,6 +546,11 @@ def suggest_categories(
                 batch_error = str(exc)
                 break
 
+        if suggestions is None and first_partial is not None:
+            suggestions = first_partial.suggestions
+            batch_diagnostics = first_partial.diagnostics
+            if batch_error is not None:
+                batch_diagnostics.append(batch_error)
         if suggestions is None:
             result.batch_errors.append(
                 batch_error or "Ollama did not return valid suggestions."
@@ -530,6 +558,8 @@ def suggest_categories(
             if progress_callback is not None:
                 progress_callback(offset + len(batch), len(transactions))
             continue
+        if batch_diagnostics:
+            result.batch_errors.append("; ".join(dict.fromkeys(batch_diagnostics)))
 
         for suggestion in suggestions:
             existing = session.get(
